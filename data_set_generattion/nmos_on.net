@@ -1,0 +1,22 @@
+* Deliverable 2 Example Single-Transistor Netlist: NMOS_ON
+.options gmin=1e-18 abstol=1e-18 reltol=1e-6 vntol=1e-9 numdgt=12
+.temp 27.0
+
+.include "45nm_HP.pm"
+
+Vd d 0 DC 0.9
+Vg g 0 DC 0.9
+Vs s 0 DC 0.0
+Vb b 0 DC 0.0
+
+M1 d g s b nmos W=180n L=45n
+
+.control
+op
+print -i(Vd)
+print -i(Vg)
+print -i(Vs)
+print -i(Vb)
+quit
+.endc
+.end
