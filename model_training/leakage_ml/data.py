@@ -11,7 +11,7 @@ from . import config as C
 def load_case(case: str) -> pd.DataFrame:
     """Read one case CSV, normalise column names and run basic sanity checks."""
     df = pd.read_csv(C.DATA_DIR / f"{case}.csv")
-    df = df.rename(columns={"vtho": "vth0"})
+    df = df.rename(columns={"vtho": "vth0"})   # old header spelling
     missing = set(C.RAW_FEATURES + C.TARGETS) - set(df.columns)
     if missing:
         raise ValueError(f"{case}: missing columns {sorted(missing)}")

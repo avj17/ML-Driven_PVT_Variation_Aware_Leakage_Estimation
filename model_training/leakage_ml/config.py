@@ -45,8 +45,8 @@ CASES = {
 TARGETS = ["id", "ig", "is", "ib"]
 
 # vg and vb are fixed by the case (0 or vdd), so they carry no information
-# beyond vdd and are dropped (see data.drop_uninformative). The dataset uses
-# the column name "vtho"; it is renamed to the spec's "vth0" on load.
+# beyond vdd and are dropped (see data.drop_uninformative). Early CSVs named
+# the vth0 column "vtho"; that name is still accepted and renamed on load.
 RAW_FEATURES = ["vdd", "temp", "w", "vd", "vs", "vg", "vb",
                 "vth0", "toxe", "ndep", "u0", "xj"]
 

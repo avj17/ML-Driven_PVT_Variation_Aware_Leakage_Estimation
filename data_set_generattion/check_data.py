@@ -74,21 +74,21 @@ plt.savefig("plot1_off_current_vs_temperature.png", dpi=300)
 
 fig, ax = plt.subplots(figsize=(8, 5.5))
 
-plot_binned_trend(ax, n_off['vtho'].abs().values, n_off['id'].abs().values,
+plot_binned_trend(ax, n_off['vth0'].abs().values, n_off['id'].abs().values,
                   'tab:blue', 'NMOS OFF |Id|')
 
-plot_binned_trend(ax, p_off['vtho'].abs().values, p_off['id'].abs().values,
+plot_binned_trend(ax, p_off['vth0'].abs().values, p_off['id'].abs().values,
                   'tab:red', 'PMOS OFF |Id|')
 
 ax.set_yscale('log')
-ax.set_xlabel('Threshold Voltage Magnitude |vtho| (V)')
+ax.set_xlabel('Threshold Voltage Magnitude |vth0| (V)')
 ax.set_ylabel('OFF Current |Id| (A) [Log Scale]')
-ax.set_title('2. OFF Current vs. |vtho|')
+ax.set_title('2. OFF Current vs. |vth0|')
 ax.grid(True, which='both', linestyle='--', alpha=0.5)
 ax.legend()
 
 plt.tight_layout()
-plt.savefig("plot2_off_current_vs_vtho.png", dpi=300)
+plt.savefig("plot2_off_current_vs_vth0.png", dpi=300)
 
 
 # ============================================================
@@ -123,7 +123,7 @@ plt.savefig("plot3_gate_current_vs_toxe.png", dpi=300)
 
 print("\nSaved all three plots successfully:")
 print("1. plot1_off_current_vs_temperature.png")
-print("2. plot2_off_current_vs_vtho.png")
+print("2. plot2_off_current_vs_vth0.png")
 print("3. plot3_gate_current_vs_toxe.png")
 
 plt.show()

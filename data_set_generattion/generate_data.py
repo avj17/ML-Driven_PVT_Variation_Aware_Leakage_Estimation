@@ -75,7 +75,7 @@ def simulate_single_sample(args):
     case_name, mos_type, row_dict = args
 
     sampled_p = {
-        'vth0': row_dict['vtho'],
+        'vth0': row_dict['vth0'],
         'toxe': row_dict['toxe'],
         'ndep': row_dict['ndep'],
         'u0':   row_dict['u0'],
@@ -153,7 +153,7 @@ def generate_case_dataset(case_name, mos_type, is_on, rng):
         row = {
             'vdd': vdd, 'temp': temp, 'w': w,
             'vd': vd, 'vs': vs, 'vg': vg, 'vb': vb,
-            'vtho': draw_pm10(nom['vth0']),
+            'vth0': draw_pm10(nom['vth0']),
             'toxe': draw_pm10(nom['toxe']),
             'ndep': draw_pm10(nom['ndep']),
             'u0':   draw_pm10(nom['u0']),
@@ -169,7 +169,7 @@ def generate_case_dataset(case_name, mos_type, is_on, rng):
                 print(f"  [{case_name}] Completed {idx}/{NUM_SAMPLES} simulations...")
 
     fieldnames = ['vdd', 'temp', 'w', 'vd', 'vs', 'vg', 'vb',
-                  'vtho', 'toxe', 'ndep', 'u0', 'xj', 'id', 'ig', 'is', 'ib']
+                  'vth0', 'toxe', 'ndep', 'u0', 'xj', 'id', 'ig', 'is', 'ib']
     csv_filename = f"{case_name}.csv"
     with open(csv_filename, 'w', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
