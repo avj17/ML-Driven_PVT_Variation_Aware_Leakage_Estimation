@@ -128,6 +128,21 @@ SEARCH_SPACES = {
             {"hidden": [512, 512, 512, 256], "activation": "gelu", "dropout": 0.0, "weight_decay": 1e-6, "lr": 1e-3, "batch_size": 128},
             {"hidden": [1024, 512, 256], "activation": "silu", "dropout": 0.0, "weight_decay": 1e-6, "lr": 3e-3, "batch_size": 512},
         ],
+        # Recipe applied to every config above (a config may override any key):
+        #   target  "direct": predict signed-log Id, Ig, Is, Ib
+        #           "kcl": predict A=(Id-Is)/2, Ig, Ib; Id, Is rebuilt by KCL
+        #           "kcl_sign": as "kcl", with |A| learned and sign(A)=sign(vd-vs) imposed
+        #   loss    "mse" or "huber" (huber_delta in standardised target units)
+        #   monitor early stopping on the inner hold-out "loss", or the spec "metric"
+        #           (mean median relative error in amperes)
+        # mlp_experiments.py compared all 12 combinations on 256-256-256 SiLU;
+        # kcl_sign + huber + metric had the lowest inner-hold-out error in all
+        # four cases (results/experiments/). The first run used direct/mse/loss.
+        "target": "kcl_sign",
+        "loss": "huber",
+        "huber_delta": 0.1,
+        "monitor": "metric",
+        "n_ensemble": 5,             # members differ in seed and inner hold-out
         "max_epochs": 3000,
         "patience": 150,
         "inner_val_frac": 0.10,
@@ -143,7 +158,7 @@ QUICK_OVERRIDES = {
                                        "min_samples_leaf": [1], "max_features": [0.6]}},
     "xgboost": {"n_iter": 2, "param_distributions": {**SEARCH_SPACES["xgboost"]["param_distributions"],
                                                      "n_estimators": [200]}},
-    "mlp": {"configs": SEARCH_SPACES["mlp"]["configs"][:1], "max_epochs": 30, "patience": 10},
+    "mlp": {"configs": SEARCH_SPACES["mlp"]["configs"][:1], "max_epochs": 30, "patience": 10, "n_ensemble": 2},
 }
 
 RF_BACKEND = "xgboost_gpu"          # or "sklearn" (CPU, OOB-tuned)

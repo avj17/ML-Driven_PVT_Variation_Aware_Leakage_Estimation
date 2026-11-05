@@ -38,13 +38,25 @@ def error_hist(errs: dict, case, split, path):
     fig.tight_layout(); fig.savefig(path, dpi=150); plt.close(fig)
 
 
-def learning_curve(history, case, path):
-    """MLP train vs inner-validation loss per epoch."""
-    fig, ax = plt.subplots(figsize=(7, 4.5))
-    ax.plot(history["train"], label="train")
-    ax.plot(history["val"], label="inner validation")
-    ax.set_yscale("log"); ax.set_xlabel("epoch"); ax.set_ylabel("MSE (standardised signed-log target)")
-    ax.set_title(f"{case}: MLP learning curve"); ax.grid(True, which="both", alpha=0.3); ax.legend()
+def learning_curve(history, case, path, loss_name="MSE"):
+    """MLP train vs inner-validation loss per epoch and, when early stopping
+    monitored it, the inner-validation median relative error (right axis)."""
+    fig, ax = plt.subplots(figsize=(7.5, 4.5))
+    ax.plot(history["train"], label="train loss")
+    ax.plot(history["val"], label="inner-validation loss")
+    ax.set_yscale("log"); ax.set_xlabel("epoch")
+    ax.set_ylabel(f"{loss_name} loss (standardised targets)")
+    lines, labels = ax.get_legend_handles_labels()
+    if "score" in history:
+        ax2 = ax.twinx()
+        ax2.plot(history["score"], color="tab:red", alpha=0.6, label="inner-validation median error")
+        best = int(np.argmin(history["score"]))
+        ax2.axvline(best, color="tab:red", ls="--", lw=1, label=f"best epoch {best + 1} (weights kept)")
+        ax2.set_yscale("log"); ax2.set_ylabel("median relative error (%), mean over currents")
+        l2, lab2 = ax2.get_legend_handles_labels()
+        lines, labels = lines + l2, labels + lab2
+    ax.set_title(f"{case}: MLP learning curve (ensemble member 1)")
+    ax.grid(True, which="both", alpha=0.3); ax.legend(lines, labels, fontsize=8)
     fig.tight_layout(); fig.savefig(path, dpi=150); plt.close(fig)
 
 

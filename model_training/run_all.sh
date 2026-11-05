@@ -38,6 +38,7 @@ python -c "import torch, xgboost; assert torch.cuda.is_available(); print('torch
 EXTRA=${EXTRA:-}            # e.g. EXTRA=--quick for a smoke test
 JOBS_PER_CASE=${JOBS_PER_CASE:-2}
 MODELS=${MODELS:-"poly_elasticnet random_forest xgboost mlp"}   # families for step 1
+RAW_MODELS=${RAW_MODELS:-"xgboost mlp"}                          # families for the raw-feature ablation
 STEPS=${STEPS:-"train raw eval size"}                            # which steps to run
 TAG=${MODELS// /+}
 has_step() { [[ " $STEPS " == *" $1 "* ]]; }
@@ -57,7 +58,7 @@ train_cases() {   # $1 = log prefix, rest = train.py args
 if has_step train; then train_cases "train_${TAG}" --models $MODELS; fi
 
 # 2. Feature ablation: same pipeline on raw inputs only (XGBoost + MLP).
-if has_step raw; then train_cases "train_raw" --models xgboost mlp --feature-set raw; fi
+if has_step raw; then train_cases "train_raw_${RAW_MODELS// /+}" --models $RAW_MODELS --feature-set raw; fi
 
 # 3. Compare on validation, choose per case, evaluate once on test, plots.
 if has_step eval; then python evaluate.py > logs/evaluate.log 2>&1; fi

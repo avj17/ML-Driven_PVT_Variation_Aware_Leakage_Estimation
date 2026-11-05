@@ -68,7 +68,7 @@ def main():
         for fam in args.models:
             print(f"  -> {fam}")
             t0 = time.perf_counter()
-            model, tuning = FITTERS[fam](X_tr, Y_tr, spaces[fam], n_jobs=args.n_jobs)
+            model, tuning = FITTERS[fam](X_tr, Y_tr, spaces[fam], n_jobs=args.n_jobs, tf=d["tf"])
             fit_s = time.perf_counter() - t0
 
             t1 = time.perf_counter()

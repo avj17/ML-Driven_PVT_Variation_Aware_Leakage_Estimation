@@ -4,14 +4,25 @@ Team StaticSilicon. Model file 45nm_HP, VDD = 0.9 V, L = 45 nm.
 
 This document records how the four model families were trained for the four
 transistor cases (NMOS ON/OFF, PMOS ON/OFF), the architecture and
-hyperparameters of each, every metric, and why the MLP was chosen. All numbers
-come from `results/` (the JSON files in `results/candidates/` hold the full
-search traces).
+hyperparameters of each, every metric, why the MLP was chosen, and how the MLP
+was then improved. All numbers come from `results/` (the JSON files in
+`results/candidates/` hold the full search traces).
 
-**Short version.** The MLP is the best family in all four cases on the
-validation set. On the test set its median error per terminal current is
-0.56–5.4 %, R² (signed-log) is 0.995–1.000, and the sign of the current is right
-99.5–100 % of the time.
+**Short version.**
+- The MLP is the best family in all four cases on the validation set.
+- The final MLP is a 5-network ensemble. Each network predicts the channel-like current A = (Id−Is)/2 together with Ig and Ib, and Id and Is are rebuilt exactly with KCL.
+- On the test set, its median error is 0.27–0.74 % per terminal current, and 0.40–0.68 % averaged over the four currents.
+- R² (signed-log) is ≥ 0.997, R² on raw amperes is ≥ 0.998, and the current's sign is right 99.8–100 % of the time.
+- This meets the TA's target of R² > 0.99 and error < 1 % (median).
+
+**Two versions of the MLP.**
+
+| Version | What it is | Test median error, NMOS_ON / NMOS_OFF / PMOS_ON / PMOS_OFF |
+|---|---|---|
+| v1 | One network per case, predicting Id, Ig, Is and Ib directly | 1.13 / 2.81 / 2.60 / 2.94 % |
+| **v2 (final)** | KCL outputs, Huber loss, early stopping on the spec metric, 5-network ensemble | **0.49 / 0.54 / 0.68 / 0.40 %** |
+
+§6 explains the error analysis that led to v2. The v1 results are kept in `results/v1/`.
 
 ---
 
@@ -22,30 +33,31 @@ validation set. On the test set its median error per terminal current is
 | Data | 4 CSVs (one per case), 10,000 ngspice samples each (`data_set_generattion/`) |
 | Split | 70 / 15 / 15 → 7,000 train / 1,500 val / 1,500 test, `train_test_split`, seed 42. Indices saved in `results/splits/<case>_split.json` so every model uses the same rows |
 | Targets | The four terminal currents Id, Ig, Is, Ib |
-| Hardware | Ada HPC, one RTX 2080 Ti (gnode043), 10 CPUs, 20 GB RAM |
-| Software | Python 3.12.4, PyTorch 2.14.1 (CUDA 12.6), XGBoost 3.4.1 (`xgboost-cu12`), scikit-learn 1.9 |
+| Hardware | Ada HPC, one RTX 2080 Ti, 10 CPUs, 20 GB RAM |
+| Software | Python 3.12.4, PyTorch 2.14.1 (CUDA 12.6), XGBoost 3.4.1 (`xgboost-cu12`), scikit-learn 1.9.1 |
 | Seeds | `SEED_SPLIT=42`, `SEED_CV=43`, `SEED_MODEL=44`, `SEED_TORCH=45` (separate streams, `leakage_ml/config.py`) |
 
 ### Rule for using the three splits
 
-- **TRAIN (7,000):** used for everything that is fitted or tuned: scalers, the target transform's I0, dropped-column decisions, and all hyperparameter search (5-fold CV, or an inner 10 % hold-out for the MLP).
-- **VAL (1,500):** used only to compare the four families and pick one per case.
-- **TEST (1,500):** used once, in `evaluate.py`, on the chosen model only.
+- **TRAIN (7,000):** used for everything that is fitted or tuned: scalers, the target transforms, dropped-column decisions, and all hyperparameter and recipe search (5-fold CV, or an inner 10 % hold-out for the MLP).
+- **VAL (1,500):** used only to compare the model families and pick one per case.
+- **TEST (1,500):** used in `evaluate.py` only, to report the chosen models. It was never used for training, tuning or choosing anything (see §11).
 
 ## 2. Preprocessing (same for every family)
 
 ### 2.1 Target transform: signed log
 
 The currents span about 12 decades (1e-17 to 5e-4 A), and Id/Is change sign
-(about 50 % negative in the ON cases, 13–21 % in the OFF cases). So every model
-predicts
+(about 50 % negative in the ON cases, 13–21 % in the OFF cases). So the models
+work with
 
     y = sign(I) · log10(1 + |I| / I0)
 
 with one I0 per current, set on TRAIN as 0.1 × the 1st percentile of |I|.
 
-- For |I| ≫ I0 this is log10(|I|/I0). An error dy in y is then a relative current error of about ln(10)·dy, so minimising MSE in y approximately minimises relative error, which is what the spec scores.
+- For |I| ≫ I0 this is log10(|I|/I0). An error dy in y is then a relative current error of about ln(10)·dy, so fitting y approximately minimises relative error, which is what the spec scores.
 - Unlike plain log|I|, it keeps the sign and is smooth through I = 0.
+- The final MLP applies the same transform to A, Ig and Ib instead of to Id, Ig, Is and Ib (§3.4).
 
 ### 2.2 Features
 
@@ -73,8 +85,7 @@ are then removed:
 
 ### 2.3 How accuracy is measured (`leakage_ml/metrics.py`)
 
-Predictions are converted back to amperes with the inverse transform. Then, for
-each current:
+Predictions are converted back to amperes. Then, for each current:
 
 | Metric | Definition |
 |---|---|
@@ -87,8 +98,7 @@ each current:
 | Sign accuracy | % of samples where sign(I_pred) = sign(I_SPICE) |
 
 **Trivial baseline:** always predict the training mean of y. It scores R² ≈ 0
-and a median error of 97–117 %, so every model below is far better than
-chance.
+and a median error of 97–117 %.
 
 ---
 
@@ -168,61 +178,124 @@ CV-chosen number of trees.
 
 ### 3.4 MLP (PyTorch, GPU), the chosen model
 
-**Architecture:** one multi-output network per case, which predicts all four
-currents together:
+#### 3.4.1 What the network predicts: KCL outputs
 
-    input (22–25 features) → [Linear → SiLU] × k → Linear(4)
+Instead of predicting Id, Ig, Is and Ib directly, each network predicts three
+quantities:
 
-| Setting | Value |
-|---|---|
-| Input / output scaling | `StandardScaler` on X and on y (fit on the training part) |
-| Initialisation | He (Kaiming normal) weights, zero bias |
-| Loss | MSE on standardised signed-log targets |
-| Optimiser | AdamW, lr 2e-3, weight decay 1e-6 |
-| LR schedule | ReduceLROnPlateau, factor 0.5, patience 50, minimum 1e-6 |
-| Batch size | 256 |
-| Epochs | Up to 3000. Early stopping with patience 150; the best weights are restored (`copy.deepcopy`) |
-| Early-stopping data | An inner 10 % hold-out from TRAIN (6,300 fit / 700 hold-out). The official VAL set is never seen during training |
+| Output | Meaning | How its sign is handled |
+|---|---|---|
+| \|A\|, where A = (Id − Is)/2 | The "through" current, mostly channel current | sign(A) = sign(Vd − Vs) is imposed; the network learns only the magnitude |
+| Ig | Gate current | Kept in signed-log form; its sign never changes within a case |
+| Ib | Body current | Kept in signed-log form; its sign never changes within a case |
 
-**Search:** 6 configurations are trained per case. The one with the lowest
-inner hold-out MSE is kept.
+Each output is in signed-log form (§2.1). Id and Is are then rebuilt exactly
+using Kirchhoff's current law:
 
-| # | Hidden layers | Activation | Dropout | Weight decay | lr | Batch |
-|---|---|---|---|---|---|---|
-| 1 | 256-256-256 | SiLU | 0 | 1e-6 | 2e-3 | 256 |
-| 2 | 512-512-256-128 | SiLU | 0 | 1e-6 | 2e-3 | 256 |
-| 3 | 256-256-256 | ReLU | 0 | 1e-6 | 2e-3 | 256 |
-| 4 | 512-512-256-128 | SiLU | 0.05 | 1e-5 | 2e-3 | 256 |
-| 5 | 512-512-512-256 | GELU | 0 | 1e-6 | 1e-3 | 128 |
-| 6 | 1024-512-256 | SiLU | 0 | 1e-6 | 3e-3 | 512 |
+    S  = (Id + Is)/2 = −(Ig + Ib)/2      (KCL: Id + Ig + Is + Ib = 0)
+    Id =  A + S
+    Is = −A + S
 
-**Inner hold-out MSE** (standardised units; lower is better, **bold** = chosen):
+**Why this works better** (details in §6):
+- In the OFF state, Id and Is are near-cancellations of A and S. A and S are each smooth with a fixed sign pattern, but their sum is hard to learn directly in log space.
+- The sign of A follows sign(Vd−Vs) in 98.8–99.99 % of samples. Imposing it removes the sign flip at Vds = 0 from what the network must learn.
+- The four predicted currents always satisfy KCL exactly (to about 1e-16), which keeps them physically consistent for Parts B and C.
+- Rebuilding Id/Is from the *exact* A, Ig and Ib loses nothing: the median error is about 0.0003 %.
 
-| Config | NMOS_ON | NMOS_OFF | PMOS_ON | PMOS_OFF |
+Code: `KCLTransform` in `leakage_ml/transforms.py`; the sign handling is in
+`TorchMLPRegressor` in `leakage_ml/models.py`.
+
+#### 3.4.2 Final architecture
+
+The same architecture won in all four cases. One ensemble member:
+
+```
+22–25 physics features (standardised, StandardScaler fit on TRAIN)
+  → Linear(n_in → 256) → SiLU
+  → Linear(256 → 256)  → SiLU
+  → Linear(256 → 256)  → SiLU
+  → Linear(256 → 3)                       outputs: z_|A|, z_Ig, z_Ib (standardised signed-log)
+  → undo standardisation; give A the sign of (Vd − Vs)
+```
+
+The final model averages the 5 members' outputs (in signed-log space) and then
+rebuilds the four currents:
+
+```
+average of 5 members
+  → inverse signed-log → A, Ig, Ib in amperes
+  → S = −(Ig + Ib)/2;  Id = A + S;  Is = −A + S
+  → [Id, Ig, Is, Ib]
+```
+
+| Case | Inputs | Parameters per network | Networks | Total parameters |
 |---|---|---|---|---|
-| 1. 256×3 SiLU | **9.21e-5** | **3.59e-3** | 6.92e-4 | **2.98e-3** |
-| 2. 512-512-256-128 SiLU | 1.36e-4 | 3.76e-3 | **4.38e-4** | 3.08e-3 |
-| 3. 256×3 ReLU | 3.91e-4 | 4.79e-3 | 1.11e-3 | 4.43e-3 |
-| 4. #2 + dropout 0.05 | 1.40e-4 | 4.02e-3 | 5.20e-4 | 5.05e-3 |
-| 5. 512×3-256 GELU | 1.82e-4 | 4.34e-3 | 4.81e-4 | 4.58e-3 |
-| 6. 1024-512-256 SiLU | 3.31e-4 | 4.21e-3 | 9.82e-4 | 4.75e-3 |
+| NMOS_ON | 25 | 139,011 | 5 | 695,055 |
+| NMOS_OFF | 22 | 138,243 | 5 | 691,215 |
+| PMOS_ON | 25 | 139,011 | 5 | 695,055 |
+| PMOS_OFF | 24 | 138,755 | 5 | 693,775 |
 
-**The four final networks:**
+Per network the count is (n_in·256 + 256) + 2·(256·256 + 256) + (256·3 + 3).
 
-| Case | Inputs | Hidden layers | Trainable parameters | Epochs run | Fit time (all 6 configs) |
-|---|---|---|---|---|---|
-| NMOS_ON | 25 | 256-256-256 | 139,268 | 1642 | 11.3 min |
-| NMOS_OFF | 22 | 256-256-256 | 138,500 | 594 | 6.5 min |
-| PMOS_ON | 25 | 512-512-256-128 | 440,708 | 994 | 9.7 min |
-| PMOS_OFF | 24 | 256-256-256 | 139,012 | 611 | 6.8 min |
+#### 3.4.3 Training method (how the weights are updated)
+
+| Item | What is used |
+|---|---|
+| Learning type | Supervised regression, trained by mini-batch gradient descent with backpropagation (PyTorch autograd, `loss.backward()`) |
+| Weight initialisation | He (Kaiming) normal for the weights, zero biases. Every network starts from new random weights (training from scratch) |
+| Input / output scaling | `StandardScaler` on the inputs and on the 3 targets, fit on that member's training portion |
+| Loss | **Huber loss** with δ = 0.1, on the standardised targets: ½e² when \|e\| ≤ δ, and δ(\|e\| − ½δ) otherwise, averaged over the batch and the 3 outputs |
+| Optimiser (update rule) | **AdamW**: Adam with decoupled weight decay. Per step, for gradient g: m ← β1·m + (1−β1)·g, v ← β2·v + (1−β2)·g², θ ← θ − lr·(m̂ / (√v̂ + ε) + λ·θ). Settings: β1 = 0.9, β2 = 0.999, ε = 1e-8 (PyTorch defaults), weight decay λ = 1e-6 |
+| Learning rate | Starts at 2e-3. **ReduceLROnPlateau** halves it each time the inner-hold-out loss has not improved for 50 epochs, down to a minimum of 1e-6 |
+| Mini-batches | 256 samples. The 6,300 training rows are reshuffled every epoch (seeded `torch.randperm`), giving 25 weight updates per epoch |
+| Early stopping | After each epoch, the **inner-hold-out median relative error** is computed in amperes, on the rebuilt Id, Ig, Is and Ib. Training stops after 150 epochs without improvement, and the weights from the best epoch are restored (`copy.deepcopy`). The upper limit is 3,000 epochs |
+| Inner hold-out | 10 % of TRAIN (700 rows); the network trains on the other 6,300 rows. The official VAL and TEST sets are never seen |
+| Regularisation | Weight decay, early stopping and the ensemble. Dropout was tried and lost (§3.4.4) |
+| Ensemble | 5 members. Member k uses its own random seed (45 + k) **and** its own inner hold-out (seed 43 + k), so together the members train on all of TRAIN. Their outputs are averaged in signed-log space before the currents are rebuilt |
+| Precision / hardware | float32. All training data stays on the GPU (RTX 2080 Ti) |
+
+**Training length per member** (epochs run; the best epoch is 150 earlier):
+
+| Case | Members 1–5 | Fit time (6-architecture search + 4 extra members) |
+|---|---|---|
+| NMOS_ON | 1099, 1041, 1127, 1301, 1166 | 17.0 min |
+| NMOS_OFF | 999, 1235, 800, 608, 819 | 15.6 min |
+| PMOS_ON | 1006, 570, 948, 933, 774 | 14.6 min |
+| PMOS_OFF | 1451, 1602, 1342, 1121, 1391 | 19.2 min |
+
+That is roughly 15,000–40,000 weight updates per member.
+
+**Learning curves** are in `results/plots/<case>_mlp_learning_curve.png`. They
+show why early stopping uses the median error rather than the loss. The
+hold-out *loss* flattens early (about epoch 520 for NMOS_OFF). The hold-out
+*median error* keeps falling, in steps at each learning-rate halving, from
+about 2 % to 0.85 % at epoch 849. A loss-based stop would have ended training
+too early.
+
+**Prediction speed:** 0.035–0.043 ms per sample for the whole 5-network
+ensemble, on CPU.
+
+#### 3.4.4 Architecture search
+
+Six architectures were trained per case with the final recipe (first member
+only). They were scored on the inner hold-out with the spec metric: the mean
+over the four currents of the median relative error, with ties broken by p95.
+
+| # | Hidden layers | Activation | Dropout | Weight decay | lr | Batch | NMOS_ON | NMOS_OFF | PMOS_ON | PMOS_OFF |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 256-256-256 | SiLU | 0 | 1e-6 | 2e-3 | 256 | **0.84 %** | **0.81 %** | **1.04 %** | **0.67 %** |
+| 2 | 512-512-256-128 | SiLU | 0 | 1e-6 | 2e-3 | 256 | 1.28 | 1.24 | 1.33 | 1.03 |
+| 3 | 256-256-256 | ReLU | 0 | 1e-6 | 2e-3 | 256 | 3.66 | 3.62 | 4.58 | 2.89 |
+| 4 | 512-512-256-128 | SiLU | 0.05 | 1e-5 | 2e-3 | 256 | 1.22 | 1.14 | 1.36 | 0.83 |
+| 5 | 512-512-512-256 | GELU | 0 | 1e-6 | 1e-3 | 128 | 1.52 | 1.59 | 1.89 | 1.68 |
+| 6 | 1024-512-256 | SiLU | 0 | 1e-6 | 3e-3 | 512 | 1.70 | 1.47 | 1.85 | 1.28 |
+
+(Inner-hold-out median error, mean over the four currents. **Bold** = chosen.)
 
 **What the search shows:**
-- SiLU beats ReLU in every case (2–4× lower hold-out MSE). The smooth activation suits currents that are smooth exponentials of voltage.
-- Dropout never helped: with 6,300 noise-free SPICE samples the model is not overfitting much (see the train/val gap in §4).
-- Bigger is not automatically better. The 1024-512-256 net lost in every case, and the 4-layer 512-wide net won only for PMOS_ON (see §6).
-
-**Inference speed:** 0.01–0.03 ms per sample on CPU. That is the fastest of
-the four families, which matters for Parts B and C.
+- **SiLU beats ReLU by 3–4×.** The currents are smooth exponentials of voltage, and a smooth activation suits them.
+- **Bigger networks were worse in every case.** With about 6,300 samples, the larger networks fit less well within the training budget. The small 256-256-256 net won all four cases.
+- **Dropout did not help.** The SPICE data is noise-free, so dropout only adds noise to training.
 
 ---
 
@@ -230,7 +303,7 @@ the four families, which matters for Parts B and C.
 
 These numbers are from the validation set (1,500 samples per case). "Train
 median" is the same metric on TRAIN, so the gap between it and "Median"
-shows over-fitting.
+shows over-fitting. The MLP rows are the final v2 model.
 
 ### 4.1 Summary (Deliverable 4): mean over Id, Ig, Is, Ib
 
@@ -240,52 +313,50 @@ shows over-fitting.
 | | Poly Elastic Net | 0.9971 | 13.80 | 44.3 | 57.1 | 13.60 |
 | | Random Forest | 0.9926 | 12.98 | 63.2 | 76.9 | 4.63 |
 | | XGBoost | 0.9987 | 6.27 | 29.9 | 36.5 | 2.08 |
-| | **MLP** | **0.9999** | **1.09** | **6.3** | **7.8** | 0.34 |
+| | **MLP** | **0.9999** | **0.51** | **3.7** | **6.5** | 0.13 |
 | NMOS_OFF | Baseline (mean) | 0.000 | 116.7 | 681 | 2238 | – |
 | | Poly Elastic Net | 0.9710 | 35.54 | 185.6 | 380.1 | 33.04 |
 | | Random Forest | 0.9914 | 10.29 | 57.3 | 92.3 | 3.99 |
 | | XGBoost | 0.9951 | 5.24 | 39.5 | 72.5 | 1.49 |
-| | **MLP** | **0.9985** | **2.86** | **13.8** | **23.4** | 2.29 |
+| | **MLP** | **0.9989** | **0.53** | **6.1** | **10.0** | 0.17 |
 | PMOS_ON | Baseline (mean) | 0.000 | 96.8 | 2592 | 8693 | – |
 | | Poly Elastic Net | 0.9965 | 13.79 | 50.8 | 68.4 | 13.31 |
 | | Random Forest | 0.9938 | 12.46 | 65.9 | 82.4 | 4.93 |
 | | XGBoost | 0.9987 | 5.96 | 29.0 | 38.1 | 2.03 |
-| | **MLP** | **0.9997** | **2.63** | **13.9** | **20.0** | 1.22 |
+| | **MLP** | **0.9997** | **0.69** | **5.4** | **10.2** | 0.31 |
 | PMOS_OFF | Baseline (mean) | -0.001 | 116.2 | 761 | 1905 | – |
 | | Poly Elastic Net | 0.9607 | 31.85 | 116.6 | 215.6 | 29.54 |
 | | Random Forest | 0.9857 | 8.28 | 53.2 | 83.2 | 3.25 |
 | | XGBoost | 0.9920 | 4.22 | 41.3 | 73.6 | 1.49 |
-| | **MLP** | **0.9966** | **2.97** | **15.0** | **29.0** | 2.35 |
+| | **MLP** | **0.9993** | **0.40** | **4.7** | **7.5** | 0.10 |
 
 ### 4.2 Per current (validation)
 
-Each cell gives median % / p95 % / mean %. R² (log) and sign accuracy are below
-the table.
+Each cell gives median % / p95 % / mean %.
 
 | Case | Current | Poly Elastic Net | Random Forest | XGBoost | MLP |
 |---|---|---|---|---|---|
-| NMOS_ON | Id | 17.1 / 56.5 / 377 | 11.5 / 66.4 / 44.0 | 6.11 / 36.5 / 16.8 | **1.54 / 7.8 / 7.3** |
-| | Ig | 6.97 / 24.7 / 9.5 | 13.4 / 43.1 / 16.9 | 5.31 / 17.5 / 6.8 | **0.65 / 7.2 / 2.0** |
-| | Is | 17.1 / 57.1 / 123 | 11.4 / 66.2 / 27.5 | 5.69 / 35.1 / 11.4 | **1.59 / 7.7 / 3.7** |
-| | Ib | 14.1 / 38.8 / 16.5 | 15.7 / 76.9 / 24.7 | 7.96 / 30.5 / 10.6 | **0.58 / 2.7 / 0.9** |
-| NMOS_OFF | Id | 61.0 / 320 / 109 | 15.0 / 92.3 / 26.5 | 7.89 / 72.5 / 16.4 | **3.71 / 18.4 / 6.6** |
-| | Ig | 1.67 / 6.0 / 2.4 | 9.84 / 39.2 / 14.3 | 4.93 / 16.1 / 6.2 | **1.31 / 4.8 / 1.8** |
-| | Is | 66.5 / 380 / 108 | 16.1 / 87.5 / 30.3 | 7.63 / 61.5 / 17.9 | **5.51 / 23.4 / 13.2** |
-| | Ib | 13.0 / 36.0 / 16.5 | **0.23** / 10.1 / 2.5 | 0.52 / **7.9** / **2.0** | 0.91 / 8.4 / 2.5 |
-| PMOS_ON | Id | 18.0 / 61.9 / 25.6 | 13.2 / 81.0 / 30.5 | 5.95 / 38.1 / 12.3 | **4.10 / 19.2 / 7.0** |
-| | Ig | 4.79 / 32.3 / 9.4 | 11.4 / 39.1 / 15.4 | 4.59 / 14.4 / 5.9 | **1.09 / 11.8 / 3.4** |
-| | Is | 18.6 / 68.4 / 55.2 | 13.5 / 82.4 / 29.3 | 5.82 / 36.3 / 17.5 | **4.16 / 20.0 / 8.5** |
-| | Ib | 13.8 / 40.7 / 16.3 | 11.8 / 61.2 / 20.3 | 7.50 / 27.0 / 10.0 | **1.17 / 4.6 / 1.6** |
-| PMOS_OFF | Id | 55.1 / 216 / 104 | 10.6 / 77.3 / 21.4 | 5.43 / 73.6 / 16.0 | **4.22 / 17.6 / 7.6** |
-| | Ig | 1.99 / 7.9 / 3.0 | 10.2 / 40.2 / 15.0 | 5.12 / 17.1 / 6.6 | **1.51 / 5.8 / 2.2** |
-| | Is | 57.3 / 206 / 240 | 11.7 / 83.2 / 23.8 | 5.63 / 67.2 / 16.6 | **4.77 / 29.0 / 10.3** |
-| | Ib | 13.0 / 37.5 / 18.8 | **0.64** / 12.0 / 3.6 | 0.69 / **7.1** / **2.1** | 1.37 / 7.7 / 4.0 |
+| NMOS_ON | Id | 17.1 / 56.5 / 377 | 11.5 / 66.4 / 44.0 | 6.11 / 36.5 / 16.8 | **0.55 / 3.1 / 1.2** |
+| | Ig | 6.97 / 24.7 / 9.5 | 13.4 / 43.1 / 16.9 | 5.31 / 17.5 / 6.8 | **0.48 / 6.5 / 1.8** |
+| | Is | 17.1 / 57.1 / 123 | 11.4 / 66.2 / 27.5 | 5.69 / 35.1 / 11.4 | **0.55 / 3.1 / 1.1** |
+| | Ib | 14.1 / 38.8 / 16.5 | 15.7 / 76.9 / 24.7 | 7.96 / 30.5 / 10.6 | **0.48 / 2.2 / 0.7** |
+| NMOS_OFF | Id | 61.0 / 320 / 109 | 15.0 / 92.3 / 26.5 | 7.89 / 72.5 / 16.4 | **0.76 / 10.0 / 4.1** |
+| | Ig | 1.67 / 6.0 / 2.4 | 9.84 / 39.2 / 14.3 | 4.93 / 16.1 / 6.2 | **0.37 / 1.9 / 0.7** |
+| | Is | 66.5 / 380 / 108 | 16.1 / 87.5 / 30.3 | 7.63 / 61.5 / 17.9 | **0.69 / 8.5 / 3.8** |
+| | Ib | 13.0 / 36.0 / 16.5 | **0.23** / 10.1 / 2.5 | 0.52 / 7.9 / 2.0 | 0.32 / **4.1** / **1.5** |
+| PMOS_ON | Id | 18.0 / 61.9 / 25.6 | 13.2 / 81.0 / 30.5 | 5.95 / 38.1 / 12.3 | **0.78 / 4.3 / 1.8** |
+| | Ig | 4.79 / 32.3 / 9.4 | 11.4 / 39.1 / 15.4 | 4.59 / 14.4 / 5.9 | **0.58 / 10.2 / 2.7** |
+| | Is | 18.6 / 68.4 / 55.2 | 13.5 / 82.4 / 29.3 | 5.82 / 36.3 / 17.5 | **0.77 / 4.3 / 2.3** |
+| | Ib | 13.8 / 40.7 / 16.3 | 11.8 / 61.2 / 20.3 | 7.50 / 27.0 / 10.0 | **0.63 / 2.7 / 1.0** |
+| PMOS_OFF | Id | 55.1 / 216 / 104 | 10.6 / 77.3 / 21.4 | 5.43 / 73.6 / 16.0 | **0.44 / 6.5 / 2.6** |
+| | Ig | 1.99 / 7.9 / 3.0 | 10.2 / 40.2 / 15.0 | 5.12 / 17.1 / 6.6 | **0.25 / 1.5 / 0.6** |
+| | Is | 57.3 / 206 / 240 | 11.7 / 83.2 / 23.8 | 5.63 / 67.2 / 16.6 | **0.48 / 7.5 / 2.2** |
+| | Ib | 13.0 / 37.5 / 18.8 | 0.64 / 12.0 / 3.6 | 0.69 / 7.1 / 2.1 | **0.42 / 3.3 / 2.2** |
 
-**R² (log), MLP:** 0.9916–1.0000 on every current. The lowest values are the
-OFF-state currents; the lowest of all is PMOS_OFF Is (0.9916).
+**R² (log), MLP:** 0.9975–1.0000 on every current.
 
 **Sign accuracy:**
-- MLP: 99.1–100 %, with Ig and Ib always 100 %.
+- MLP: 99.7–100 %, with Ig and Ib always 100 %.
 - XGBoost: 98.9–100 %.
 - Random Forest: 98.8–100 %.
 - Elastic Net: 98.4–100 %.
@@ -293,8 +364,8 @@ OFF-state currents; the lowest of all is PMOS_OFF Is (0.9916).
 **Other observations:**
 - **Elastic Net R² (raw):** negative for OFF-state Id/Is (down to −3.8e6 on PMOS_OFF Is). A few predictions are off by orders of magnitude in amperes even though R² (log) is 0.92–0.95. A degree-3 polynomial cannot follow the exponential subthreshold behaviour over 12 decades.
 - **Over-fitting (train median vs val median):**
-  - The tree models over-fit the most: XGBoost reaches 1.5–2 % on train but 4–6 % on val, and RF 4–5 % vs 8–13 %.
-  - The MLP gap is small: 0.3→1.1, 2.3→2.9, 1.2→2.6, 2.3→3.0.
+  - The tree models over-fit the most: XGBoost reaches 1.5–2 % on train but 4–6 % on val, and RF 3–5 % vs 8–13 %.
+  - The MLP reaches 0.10–0.31 % on train and 0.40–0.69 % on val. A gap remains, but the absolute errors are an order of magnitude below the other families.
   - Elastic Net has no gap, but high error on both: it is under-fitting (high bias).
 
 ---
@@ -304,163 +375,246 @@ OFF-state currents; the lowest of all is PMOS_OFF Is (0.9916).
 **Selection rule** (fixed before looking at results, `config.py`): lowest mean
 median error over the four currents on VAL; ties are broken by mean p95.
 
-The MLP wins in all four cases, and the win is not marginal:
+The MLP wins in all four cases, by a wide margin:
 
-1. **Accuracy.** Its median error is 1.4–5.8× lower than XGBoost, the next-best model, and its p95 is 2.1–4.7× lower. It wins 14 of the 16 per-current comparisons on median error. The two exceptions are OFF-state Ib, where RF and XGBoost reach 0.2–0.7 % against the MLP's 0.9–1.4 %, all already under 1.5 %.
-2. **The tails matter for Parts B and C.** Gate and circuit leakage is a sum of transistor currents, mostly the OFF-transistor channel currents plus gate leakage. The MLP's worst p95 is 8–29 %, against 37–74 % for XGBoost and 77–92 % for RF. Fewer wild predictions mean the sums stay accurate.
-3. **Smooth function.** The I–V relationship is smooth (exponential in Vgs/V_T, saturating in Vds), and an MLP with a smooth activation is a smooth function. Trees are piecewise constant: they need very many leaves to follow an exponential over 12 decades, and they step between training points. That shows up in their larger val–train gaps.
-4. **One network for all four currents.** The currents are physically linked (KCL: Id + Ig + Is + Ib = 0), and a shared hidden representation learns that structure. The other families use four separate models.
-5. **Cost.** Training takes 7–11 min per case, against 3.5 h for XGBoost and 2.7 h for RF. Prediction takes 0.01–0.03 ms per sample, which is fast for the many calls in Parts B and C.
-6. **Over-fitting is controlled.** Early stopping uses a hold-out carved from TRAIN, and the train–val gap is the smallest of all the flexible models. Test results (§7) match validation.
+1. **Accuracy.** Its median error is 9–12× lower than XGBoost, the next-best model, and its p95 is 5–9× lower. It wins 15 of the 16 per-current comparisons on median error. The one exception is NMOS_OFF Ib, where RF reaches 0.23 % against the MLP's 0.32 %; even there, the MLP's p95 is lower.
+2. **The tails matter for Parts B and C.** Gate and circuit leakage is a sum of transistor currents, mostly the OFF-transistor channel currents plus gate leakage. The MLP's worst p95 is 6.5–10 %, against 37–74 % for XGBoost and 77–92 % for RF.
+3. **Smooth function.** The I–V relationship is smooth (exponential in Vgs/V_T, saturating in Vds), and an MLP with a smooth activation is a smooth function. Trees are piecewise constant: they need very many leaves to follow an exponential over 12 decades, and they step between training points.
+4. **Physical structure can be built in.** One network predicts A, Ig and Ib together, and KCL is enforced exactly by construction (§3.4.1). The tree families predict each current separately and do not satisfy KCL.
+5. **Cost.** Training takes 15–19 min per case including the ensemble, against 3.5 h for XGBoost and 2.7 h for RF. Prediction takes 0.04 ms per sample, which is fast for the many calls in Parts B and C.
 
 XGBoost is kept as the documented runner-up.
 
 ---
 
-## 6. Do the MLPs differ between cases?
+## 6. Error analysis and how the MLP was improved (v1 → v2)
 
-Yes. Each case has its own network trained on its own data. Three cases chose
-the same architecture (256-256-256, about 139k parameters; the small
-differences come from the number of inputs). PMOS_ON chose the larger
-512-512-256-128 net, with 441k parameters.
+The first MLP (v1) predicted Id, Ig, Is and Ib directly, with MSE loss and
+early stopping on the hold-out MSE. NMOS_ON reached 1.1 % median error, but the
+other three cases were stuck at 2.6–3.0 %. `analyze_errors.py` breaks the
+validation error down by current and operating region. It uses TRAIN and VAL
+only, never test. The reports are `results/v1/error_analysis.md` (v1) and
+`results/error_analysis.md` (v2).
 
-**The larger network is not why one case is more accurate than another:**
-- The most accurate case, **NMOS_ON** (1.09 % median), uses the *small* net (139k).
-- **PMOS_ON**, with the large net (441k), is at 2.63 %.
-- For NMOS_ON, NMOS_OFF and PMOS_OFF, the larger 4-layer net was *worse* on the inner hold-out than 256×3.
-- The 1024-512-256 net, with even more parameters, lost in every case.
+### 6.1 What the analysis of v1 found
 
-The extra capacity helped only within PMOS_ON. There, the 512-512-256-128 net
-had 37 % lower hold-out MSE than 256×3, which suggests the PMOS ON surface is
-harder to fit.
+1. **Id and Is were the problem; Ig and Ib were not.**
 
-The differences in accuracy between cases come from the physics:
-- **OFF-state Id and Is are the hardest targets in every family.** Near Vds ≈ 0 the channel current becomes tiny and changes sign, and gate and junction leakage compete with it, so the relative error grows.
-- **PMOS is harder than NMOS** for every family, not only the MLP.
+   | Case | v1 val median: Id / Ig / Is / Ib |
+   |---|---|
+   | NMOS_ON | 1.54 / 0.65 / 1.59 / 0.58 % |
+   | NMOS_OFF | 3.71 / 1.31 / 5.51 / 0.91 % |
+   | PMOS_ON | 3.84 / 1.05 / 3.76 / 0.98 % |
+   | PMOS_OFF | 4.22 / 1.51 / 4.77 / 1.37 % |
 
-All four cases went through the same 6-config search with the same rule, so
-the comparison is fair. Each case simply gets the architecture its data
-supports best.
+2. **The labels are clean.** The SPICE KCL residual \|Id+Ig+Is+Ib\| is about 0 % of \|Id\| and \|Is\|, so the error is not noise in the data.
+3. **The models underfit.** Even on TRAIN, v1 reached only 2.7–4.7 % median error on OFF Id/Is, against 0.55 % for NMOS_ON. The error was spread evenly over Vds, temperature and current size.
+4. **In the OFF state, Id is a near-cancellation.** Write Id = A + S, with A = (Id−Is)/2 and S = (Id+Is)/2 = −(Ig+Ib)/2.
+   - The leakage part S dominates in 58 % (NMOS_OFF) and 72 % (PMOS_OFF) of samples.
+   - The cancellation factor κ = (\|A\|+\|S\|)/\|Id\| has a 95th percentile of 14.7 (NMOS_OFF) and 24.6 (PMOS_OFF). In the worst 5 % of samples, Id is the difference of two currents 15–25× larger than Id itself.
+   - A direct model must learn this difference in log space, including a sign flip of Id at a location that changes from sample to sample.
+5. **A few samples dominated training.** In the OFF cases, 79–88 % of the squared error on Id/Is came from the worst 1 % of samples. Both MSE training and MSE-based early stopping chased those few points instead of the bulk.
+6. **The pieces are simple.**
+   - Ig and Ib never change sign within a case.
+   - In the OFF cases, S never changes sign either.
+   - sign(A) = sign(Vd−Vs) in 98.8–99.99 % of samples.
+
+### 6.2 Recipe study (`mlp_experiments.py`)
+
+Twelve recipes were trained on the same 256-256-256 SiLU network, one member
+each:
+- **Target:** direct, KCL, or KCL with imposed sign.
+- **Loss:** MSE or Huber.
+- **Early stopping monitor:** loss, or the spec metric.
+
+The recipe was chosen on the **inner hold-out** (part of TRAIN). Validation
+numbers are shown only for information.
+
+| Target | Loss | Early stop on | Inner-hold-out median, NMOS_ON / NMOS_OFF / PMOS_ON / PMOS_OFF | Val median, same order |
+|---|---|---|---|---|
+| direct (v1) | MSE | loss | 1.14 / 2.95 / 2.32 / 3.05 | 1.09 / 2.86 / 2.41 / 2.97 |
+| direct | MSE | metric | 1.08 / 1.63 / 1.67 / 1.52 | 1.09 / 1.64 / 1.81 / 1.49 |
+| direct | Huber | loss | 1.33 / 1.27 / 1.30 / 1.57 | 1.40 / 1.22 / 1.28 / 1.51 |
+| direct | Huber | metric | 1.18 / 1.20 / 1.06 / 1.24 | 1.30 / 1.15 / 1.13 / 1.25 |
+| KCL | MSE | loss | 1.90 / 2.41 / 2.48 / 1.86 | 1.97 / 2.25 / 2.54 / 1.83 |
+| KCL | MSE | metric | 1.79 / 1.86 / 2.35 / 1.28 | 1.97 / 1.82 / 2.39 / 1.29 |
+| KCL | Huber | loss | 1.94 / 1.32 / 2.60 / 1.21 | 1.93 / 1.22 / 2.63 / 1.15 |
+| KCL | Huber | metric | 2.13 / 1.19 / 1.87 / 1.13 | 2.25 / 1.06 / 1.94 / 1.13 |
+| KCL + sign | MSE | loss | 1.18 / 2.71 / 1.72 / 1.04 | 1.36 / 2.76 / 1.76 / 0.98 |
+| KCL + sign | MSE | metric | 1.11 / 1.18 / 1.29 / 1.09 | 1.25 / 1.19 / 1.26 / 1.10 |
+| KCL + sign | Huber | loss | 0.92 / 0.84 / 1.19 / 0.67 | 0.94 / 0.89 / 1.16 / 0.63 |
+| **KCL + sign** | **Huber** | **metric** | **0.84 / 0.81 / 1.04 / 0.67** | **0.88 / 0.85 / 1.06 / 0.62** |
+
+(All values are mean median error in %, averaged over the four currents.)
+
+**Takeaways:**
+- **The v1 row reproduces the original v1 results:** 1.09 / 2.86 / 2.97 % on val for NMOS_ON / NMOS_OFF / PMOS_OFF, exactly as before. PMOS_ON gives 2.41 % here against v1's 2.63 %, because v1 had picked a different architecture (512-512-256-128) for that case. So the study is a fair comparison.
+- **KCL without the imposed sign is *worse* than direct** in the ON cases. A signed A flips sign exactly at Vds = 0, and that jump is hard to learn. **Imposing sign(A) is the key step.**
+- **Huber loss and metric-based early stopping each help,** and they add up.
+- **The same recipe wins in all four cases,** so it became the default (`config.py`).
+- **On top of the winning recipe,** the 6-architecture search and the 5-member ensemble cut the val median by a further 35–40 %: from 0.88 / 0.85 / 1.06 / 0.62 to 0.51 / 0.53 / 0.69 / 0.40 %.
+
+### 6.3 Where the remaining error is (v2)
+
+- **OFF Id/Is tail:** p95 8–10 %. It comes from samples where the leakage part dominates (\|A\|/(\|A\|+\|S\|) < 0.9): NMOS_OFF Id has a p95 of 12–15 % there, against about 3 % elsewhere. Two things contribute:
+  - the cancellation of §6.1, item 4, where a 0.5 % error in A or S still becomes about 8 % on Id;
+  - the 0.6–1.2 % of OFF samples where the imposed sign of A is wrong (§12).
+- **ON Ig tail:** p95 6.5–10 %. It comes from deep subthreshold, where Vgs is more than 10·V_T below Vth. There, Ig has a median error of 11–15 % and a p95 of 44–76 %. That region holds 4.6 % of NMOS_ON samples and 7.4 % of PMOS_ON samples, which is why PMOS_ON's Ig tail is larger.
+- **Everywhere else,** the error is 0.3–0.8 % median.
 
 ---
 
-## 7. Test-set results of the chosen models (Deliverable 5)
+## 7. Do the MLPs differ between cases?
 
-These are evaluated once, on 1,500 test samples per case.
+**Architecture:** no. All four cases chose the same 256-256-256 SiLU network.
+The parameter counts differ only through the number of inputs (138–139k per
+network, × 5 networks). The v1 MLP had chosen a bigger 512-512-256-128 net for
+PMOS_ON; with the v2 recipe that net lost in every case (§3.4.4).
+
+**Weights:** yes. Each case has its own five networks, trained from scratch on
+its own data.
+
+**Accuracy:** the remaining differences come from the physics, not the model:
+- the OFF cases have the cancellation tail in Id/Is (§6.3);
+- PMOS_ON has more deep-subthreshold samples, where Ig is hardest.
+
+---
+
+## 8. Test-set results of the chosen models (Deliverable 5)
+
+These are evaluated on 1,500 test samples per case, after everything else was
+fixed.
 
 | Case | Current | R² (log) | R² (raw) | Median % | p95 % | Mean % | Sign accuracy % |
 |---|---|---|---|---|---|---|---|
-| NMOS_ON | Id | 1.0000 | 0.9994 | 1.64 | 8.96 | 9.87 | 99.80 |
-| | Ig | 0.9991 | 0.9998 | 0.63 | 8.60 | 2.48 | 100 |
-| | Is | 1.0000 | 0.9994 | 1.68 | 8.93 | 7.87 | 99.80 |
-| | Ib | 1.0000 | 0.9996 | 0.56 | 2.65 | 0.87 | 100 |
-| NMOS_OFF | Id | 0.9990 | 0.9824 | 3.67 | 18.99 | 6.43 | 99.87 |
-| | Ig | 0.9998 | 0.9996 | 1.29 | 4.68 | 1.75 | 100 |
-| | Is | 0.9974 | 0.9917 | 5.36 | 23.55 | 8.91 | 99.80 |
-| | Ib | 0.9970 | 0.9979 | 0.91 | 7.45 | 3.35 | 100 |
-| PMOS_ON | Id | 1.0000 | 0.9972 | 4.16 | 17.32 | 6.36 | 100 |
-| | Ig | 0.9988 | 0.9998 | 1.00 | 11.75 | 3.25 | 100 |
-| | Is | 1.0000 | 0.9976 | 4.11 | 17.28 | 6.33 | 99.93 |
-| | Ib | 0.9996 | 0.9993 | 1.12 | 4.66 | 1.84 | 100 |
-| PMOS_OFF | Id | 0.9976 | 0.9889 | 4.21 | 21.50 | 7.13 | 99.80 |
-| | Ig | 0.9994 | 0.9990 | 1.60 | 6.04 | 2.33 | 100 |
-| | Is | 0.9950 | 0.9817 | 4.64 | 25.55 | 8.46 | 99.47 |
-| | Ib | 0.9971 | 0.9967 | 1.29 | 8.34 | 4.79 | 100 |
+| NMOS_ON | Id | 1.0000 | 0.9999 | 0.51 | 3.63 | 1.51 | 99.87 |
+| | Ig | 0.9993 | 0.9998 | 0.47 | 7.27 | 2.08 | 100 |
+| | Is | 1.0000 | 0.9999 | 0.52 | 3.63 | 1.54 | 99.93 |
+| | Ib | 1.0000 | 0.9995 | 0.44 | 2.42 | 0.76 | 100 |
+| NMOS_OFF | Id | 0.9995 | 0.9998 | 0.74 | 8.32 | 3.55 | 99.87 |
+| | Ig | 0.9999 | 0.9999 | 0.35 | 1.97 | 0.74 | 100 |
+| | Is | 0.9977 | 0.9998 | 0.73 | 8.26 | 5.06 | 99.80 |
+| | Ib | 0.9975 | 0.9988 | 0.35 | 4.18 | 2.53 | 100 |
+| PMOS_ON | Id | 1.0000 | 0.9999 | 0.74 | 3.60 | 1.57 | 100 |
+| | Ig | 0.9987 | 0.9999 | 0.59 | 9.67 | 2.64 | 100 |
+| | Is | 1.0000 | 0.9999 | 0.74 | 3.68 | 2.19 | 100 |
+| | Ib | 0.9996 | 0.9995 | 0.64 | 2.51 | 1.18 | 100 |
+| PMOS_OFF | Id | 0.9997 | 0.9997 | 0.47 | 5.67 | 1.76 | 99.93 |
+| | Ig | 0.9999 | 1.0000 | 0.27 | 1.52 | 0.61 | 100 |
+| | Is | 0.9999 | 0.9997 | 0.43 | 4.91 | 2.31 | 99.93 |
+| | Ib | 0.9971 | 0.9991 | 0.42 | 4.03 | 4.12 | 100 |
 
-**Mean over the four currents (test):**
+**Mean over the four currents (test), v1 → v2:**
 
-| Case | Median % | p95 % | Mean % | Median accuracy |
-|---|---|---|---|---|
-| NMOS_ON | 1.13 | 7.3 | 5.3 | 98.9 % |
-| NMOS_OFF | 2.81 | 13.7 | 5.1 | 97.2 % |
-| PMOS_ON | 2.60 | 12.8 | 4.4 | 97.4 % |
-| PMOS_OFF | 2.94 | 15.4 | 5.7 | 97.1 % |
+| Case | Median % | p95 % | Worst-current p95 % | Mean % | Median accuracy |
+|---|---|---|---|---|---|
+| NMOS_ON | 1.13 → **0.49** | 7.28 → **4.24** | 8.96 → **7.27** | 5.27 → **1.47** | **99.5 %** |
+| NMOS_OFF | 2.81 → **0.54** | 13.7 → **5.68** | 23.6 → **8.32** | 5.11 → **2.97** | **99.5 %** |
+| PMOS_ON | 2.60 → **0.68** | 12.8 → **4.86** | 17.3 → **9.67** | 4.45 → **1.89** | **99.3 %** |
+| PMOS_OFF | 2.94 → **0.40** | 15.4 → **4.03** | 25.6 → **5.67** | 5.68 → **2.20** | **99.6 %** |
 
 **Takeaways:**
-- **No over-fitting:** test agrees with validation to within about 0.1 percentage points on median error.
-- **Gate and body currents are the most accurate:** 0.6–1.6 % median.
-- **Channel currents are the least accurate:** Id/Is in the OFF and PMOS cases, at 3.7–5.4 % median.
-- **Against the 99 % target:** median accuracy is 97–99 %. Mean accuracy (100 − mean error) is 90–99 % per current. The mean is pulled down by samples where |I_SPICE| is close to 0.
+- **No over-fitting:** test agrees with validation to within about 0.03 percentage points on median error.
+- **Against the targets:**
+  - The TA's annotated target, R² > 0.99 and error < 1 %, is met on the median in every case and current. R² is ≥ 0.997 in log space and ≥ 0.998 in amperes.
+  - The spec's "up to 99 % mean accuracy" is met as median accuracy (99.3–99.6 %). Mean accuracy (100 − mean error) is 97.0–98.5 %; it is pulled down by samples where \|I_SPICE\| is close to 0.
+- **Against NMOS_ON's v1 level** (the bar the other cases were measured against): all three other cases now beat it on median, mean p95 and mean error. On worst-current p95, NMOS_OFF (8.32 %) and PMOS_OFF (5.67 %) beat it, and PMOS_ON is slightly above (9.67 % on Ig against 8.96 %).
 
 **Plots** (`results/plots/`):
 - `<case>_parity_test.png`: ML vs SPICE on log axes.
 - `<case>_error_hist_test.png`: distribution of the relative error.
-- `<case>_mlp_learning_curve.png`: train and inner-validation loss per epoch.
+- `<case>_mlp_learning_curve.png`: loss and median error per epoch for ensemble member 1.
 
 ---
 
-## 8. Feature ablation: physics vs raw inputs (validation)
+## 9. Feature ablation: physics vs raw inputs (validation)
 
-The two strongest families were retrained on the 10 raw inputs only, with the
-same search.
+The final MLP recipe and XGBoost were also trained on the 10 raw inputs only,
+with the same search.
 
 | Case | MLP physics | MLP raw | XGBoost physics | XGBoost raw |
 |---|---|---|---|---|
-| NMOS_ON | **1.09 %** (p95 6.3) | 12.45 % (p95 58.8) | 6.27 % | 12.67 % |
-| NMOS_OFF | **2.86 %** (13.8) | 5.67 % (34.9) | 5.24 % | 5.92 % |
-| PMOS_ON | **2.63 %** (13.9) | 6.09 % (42.0) | 5.96 % | 11.88 % |
-| PMOS_OFF | **2.97 %** (15.0) | 3.52 % (27.8) | 4.22 % | 6.05 % |
+| NMOS_ON | **0.51 %** (p95 3.7) | 1.72 % (p95 14.8) | 6.27 % | 12.67 % |
+| NMOS_OFF | **0.53 %** (6.1) | 1.20 % (13.4) | 5.24 % | 5.92 % |
+| PMOS_ON | **0.69 %** (5.4) | 1.81 % (19.0) | 5.96 % | 11.88 % |
+| PMOS_OFF | **0.40 %** (4.7) | 1.09 % (12.9) | 4.22 % | 6.05 % |
 
 (Each cell is the mean median error; MLP p95 in brackets.)
 
-- The physics features cut the MLP error by 1.2–11×, and the p95 by 1.9–9×.
-- The ON cases gain the most: the network no longer has to discover Vgs, Vds and the current direction by itself.
+- The physics features cut the MLP's median error by 2.2–3.4× and its p95 by 2.2–3.9×.
+- Even on raw inputs, the v2 MLP beats physics-feature XGBoost by 3–4×. Most of the gain comes from the KCL recipe; the physics features add the rest.
 
 **Permutation importance (MLP, on VAL):**
-- The most important feature in every case is `dir`, the current direction.
-- It is followed by `vov_over_vt` / `vgs_eff`, i.e. the subthreshold overdrive (Vgs − Vth)/V_T.
+- vd and vs are by far the most important inputs in every case. The sign of A is computed from them, so shuffling either one flips the sign of the channel current.
+- Next come (Vgs_eff − Vth0)/V_T, vgs_eff, vbs_eff and \|vds\|: the subthreshold overdrive and the drain bias.
 
 Files: `results/<case>_permutation_importance.csv` and
 `plots/<case>_importance.png`.
 
-## 9. How much data is needed? (`data_size_curve.py`)
+## 10. How much data is needed? (`data_size_curve.py`)
 
-The chosen MLP was refit with its tuned hyperparameters on random subsets of
-TRAIN and scored on VAL. Each cell is the mean median error, with the mean p95
-in brackets.
+The final MLP recipe, including the 5-member ensemble, was retrained on random
+subsets of TRAIN and scored on VAL. Each cell is the mean median error, with the
+mean p95 in brackets.
 
 | Training samples | NMOS_ON | NMOS_OFF | PMOS_ON | PMOS_OFF |
 |---|---|---|---|---|
-| 700 (10 %) | 34.5 % (245) | 34.6 % (237) | 34.2 % (251) | 32.9 % (170) |
-| 1,400 (20 %) | 23.8 % (126) | 24.8 % (138) | 20.3 % (86) | 22.3 % (121) |
-| 2,450 (35 %) | 8.7 % (37) | 8.8 % (52) | 13.1 % (56) | 9.9 % (58) |
-| 3,500 (50 %) | 5.6 % (25) | 6.9 % (39) | 7.7 % (36) | 6.3 % (41) |
-| 5,250 (75 %) | 8.0 % (26) | 2.5 % (16) | 4.9 % (25) | 3.4 % (21) |
-| 7,000 (100 %) | **1.1 % (6.3)** | 2.9 % (13.8) | **2.6 % (13.9)** | 3.0 % (15.0) |
+| 700 (10 %) | 7.5 % (35) | 9.9 % (93) | 8.2 % (40) | 7.8 % (138) |
+| 1,400 (20 %) | 4.6 % (23) | 5.6 % (49) | 4.7 % (26) | 4.9 % (59) |
+| 2,450 (35 %) | 2.7 % (14) | 3.1 % (29) | 3.2 % (19) | 2.3 % (29) |
+| 3,500 (50 %) | 1.7 % (10) | 1.8 % (17) | 1.7 % (15) | 1.2 % (15) |
+| 5,250 (75 %) | 0.97 % (7.0) | 0.74 % (8.5) | 1.1 % (9.6) | 0.68 % (7.8) |
+| 7,000 (100 %) | **0.51 % (3.8)** | **0.53 % (6.1)** | **0.69 % (5.4)** | **0.40 % (4.7)** |
 
 **Takeaways:**
-- Error falls steeply up to about 3,500 training samples, then keeps improving.
-- For the ON cases, the full 7,000 samples give a clear further gain: NMOS_ON goes from 5.6 % to 1.1 %, PMOS_ON from 4.9 % to 2.6 %.
-- For the OFF cases, 5,250 and 7,000 are about equal. NMOS_OFF is even slightly better at 5,250, which is within the run-to-run variation of a single MLP training.
-- The NMOS_ON bump at 5,250 (8.0 %) is the same kind of single-run variation.
-- **Conclusion:** 10,000 samples per case (7,000 for training) is the smallest size tried that gives the best accuracy in all four cases, so the dataset was not reduced. The ON curves have not flattened, so more data would likely help further.
+- Error falls steadily all the way to 7,000 training samples: the median drops by 28–47 % between 5,250 and 7,000, and the p95 by the same amount. The curve has not flattened.
+- With 5,250 samples, the < 1 % median target is met in three of the four cases (PMOS_ON is at 1.1 %). With 7,000 it is met in all four.
+- **Conclusion:** 10,000 samples per case (7,000 for training) meets the target and is what Deliverable 1 asks for, so the dataset was kept at that size. The spec does allow more samples ("may be increased or decreased as needed"). The curve suggests more data would shrink the remaining tails further, at the cost of deviating from the 10,000-row deliverable.
 
 Plot: `results/plots/data_size_curve.png`.
 
 ---
 
-## 10. Limitations
+## 11. Use of the test set
 
-- The weakest predictions are OFF-state Id/Is near Vds ≈ 0, with a median of 3.7–5.4 % and a p95 of 19–26 %. These currents are what gate leakage is built from.
-- The **mean** relative error is inflated by samples with |I| ≈ 0. Median and p95 describe typical accuracy better.
-- Each MLP is a single training run (seed 45). The bumps in the size curve show run-to-run variation; an ensemble of several seeds would reduce it.
-- The tree models were searched more narrowly than they could be (RF depth fixed at 16), because of GPU time. Their gap to the MLP is large enough that this does not change the choice.
+The test rows are read in exactly one place, `evaluate.py`, after each model is
+fixed. They are used only to compute the reported metrics and plots. No
+weight, hyperparameter, recipe or model choice ever used test data.
 
-## 11. Files and how to reproduce
+The test metrics were computed twice: once for v1 and once for v2. The v2
+redesign was motivated by the error analysis on TRAIN and VAL (§6.1), and the
+v2 recipe and architecture were chosen on the inner hold-out (part of TRAIN).
+The close agreement between validation and test (§8) is consistent with no
+over-fitting to the test set.
+
+## 12. Limitations
+
+- **OFF Id/Is tail (p95 about 8 %):** this comes from the near-cancellation of channel and leakage currents (§6.3). It can only shrink as A and S get more accurate, i.e. with more data.
+- **ON Ig in deep subthreshold (p95 7–10 %):** this region is sparsely sampled, at 5–7 % of samples. A feature for the gradual weak-to-strong inversion transition (an EKV-style interpolation) is the targeted fix.
+- **The mean relative error is inflated by samples with \|I\| ≈ 0.** Median and p95 describe typical accuracy better.
+- **The imposed sign of A is wrong in a few samples:** 1.23 % of NMOS_OFF, 0.63 % of PMOS_OFF, 0.08 % of PMOS_ON and 0.01 % of NMOS_ON. In these, A has the opposite sign to Vd−Vs, probably because the gate-to-channel current is split unevenly between source and drain. Even with \|A\| predicted exactly, the wrong sign gives these samples a large Id/Is error: 19–30 % median in the OFF cases. They are too few to affect the median, but they add to the OFF tail (p95 and above). A possible fix is to let the network predict a signed correction to A near the sign change instead of imposing the sign everywhere.
+- **The tree models were searched more narrowly than they could be** (RF depth fixed at 16), because of GPU time. Their gap to the MLP is large enough that this does not change the choice.
+
+## 13. Files and how to reproduce
 
 | What | Where |
 |---|---|
 | Final models (Deliverable 5) | `saved_models/<CASE>.joblib`. Load with `LeakagePredictor.load(path).predict(df)`, which returns amperes |
-| All 24 candidate models (on Ada) | `saved_models/candidates/` |
+| All candidate models (on Ada) | `saved_models/candidates/` |
 | Search traces and all metrics | `results/candidates/<case>__<family>[__raw].json` |
 | Comparison table (Deliverable 4) | `results/model_comparison_val.md` / `.csv`, plus `model_comparison_val_per_target.csv` |
 | Test results (Deliverable 5) | `results/chosen_models_test.md` / `.csv` |
 | Feature ablation | `results/feature_ablation_val.md` |
 | Size curve | `results/data_size_curve.csv` |
+| Error analysis | `results/error_analysis.md` (v2) and `results/v1/error_analysis.md` (v1) |
+| Recipe study | `results/experiments/mlp_<case>.md` / `.json` |
+| v1 results | `results/v1/` |
 | Logs | `logs/` |
 
 ```bash
 # On Ada (GPU job): train → raw ablation → evaluate → size curve
 sbatch run_all.sh                 # everything in one job
 bash submit_by_model.sh           # or one chained job per family
+sbatch run_experiments.sh         # MLP recipe study (§6.2)
+python analyze_errors.py          # error breakdown (§6), after evaluate.py
 ```

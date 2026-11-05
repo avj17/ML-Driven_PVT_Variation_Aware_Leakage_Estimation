@@ -23,6 +23,7 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import PolynomialFeatures, StandardScaler
 
 from . import config as C
+from .transforms import KCLTransform, SignedLogTransform
 
 
 def gpu_device():
@@ -52,7 +53,7 @@ class PerTargetRegressor:
 # ----------------------------------------------------------------------------
 # 1. Polynomial Elastic Net (scikit-learn, CPU)
 # ----------------------------------------------------------------------------
-def fit_poly_elasticnet(X, Y, space, n_jobs=-1, log=print):
+def fit_poly_elasticnet(X, Y, space, n_jobs=-1, log=print, tf=None):
     """Degree chosen by CV MSE; alpha and l1_ratio chosen by ElasticNetCV's own
     K-fold path search. Both scalers sit inside the pipeline (fit on TRAIN)."""
     estimators, info = [], []
@@ -96,7 +97,7 @@ def _cv_trace(gs):
     return rows
 
 
-def fit_random_forest(X, Y, space, n_jobs=-1, log=print):
+def fit_random_forest(X, Y, space, n_jobs=-1, log=print, tf=None):
     if C.RF_BACKEND == "sklearn":
         return _fit_random_forest_sklearn(X, Y, space["sklearn_grid"], n_jobs, log)
     import xgboost as xgb
@@ -140,7 +141,7 @@ def _fit_random_forest_sklearn(X, Y, grid, n_jobs, log):
 # ----------------------------------------------------------------------------
 # 3. XGBoost (gradient-boosted trees, GPU)
 # ----------------------------------------------------------------------------
-def fit_xgboost(X, Y, space, n_jobs=-1, log=print):
+def fit_xgboost(X, Y, space, n_jobs=-1, log=print, tf=None):
     """Randomised search; each sampled config is scored with K-fold CV on TRAIN
     via xgb.cv (early stopping on each fold's held-out part). The final model is
     refit on all of TRAIN with the CV-chosen number of trees."""
@@ -187,18 +188,41 @@ class TorchMLPRegressor:
     """torch.nn MLP with standardised inputs/targets (scalers fit on the
     training portion), AdamW, ReduceLROnPlateau and early stopping with
     best-weight restore. All tensors live on the GPU during training; the
-    fitted net is moved to CPU so saved bundles load anywhere."""
+    fitted net is moved to CPU so saved bundles load anywhere.
+
+    loss: "mse" or "huber" (robust: errors above huber_delta, in standardised
+    units, count linearly, so a few sign-crossing samples cannot dominate).
+    Early stopping monitors the inner hold-out loss, or score_fn (lower is
+    better) when one is passed to fit().
+    sign_cols=(i_vd, i_vs) with sign_outputs: those outputs are learned as
+    magnitudes and get the sign sign_flip_ * sign(vd - vs) at prediction."""
 
     def __init__(self, hidden, activation="silu", dropout=0.0, weight_decay=0.0,
-                 lr=1e-3, batch_size=256, max_epochs=1000, patience=100, seed=C.SEED_TORCH):
+                 lr=1e-3, batch_size=256, max_epochs=1000, patience=100, seed=C.SEED_TORCH,
+                 loss="mse", huber_delta=0.1, sign_cols=None, sign_outputs=()):
         self.hidden, self.activation, self.dropout = hidden, activation, dropout
         self.weight_decay, self.lr, self.batch_size = weight_decay, lr, batch_size
         self.max_epochs, self.patience, self.seed = max_epochs, patience, seed
+        self.loss, self.huber_delta = loss, huber_delta
+        self.sign_cols, self.sign_outputs = sign_cols, tuple(sign_outputs)
+        self.sign_flip_ = 1.0
         self.net, self.history = None, {"train": [], "val": []}
 
     def get_params(self):
         return {k: getattr(self, k) for k in ("hidden", "activation", "dropout", "weight_decay", "lr",
-                                              "batch_size", "max_epochs", "patience", "seed")}
+                                              "batch_size", "max_epochs", "patience", "seed",
+                                              "loss", "huber_delta", "sign_cols", "sign_outputs")}
+
+    def _signs(self, X):
+        return self.sign_flip_ * np.sign(X[:, self.sign_cols[0]] - X[:, self.sign_cols[1]])
+
+    def _post(self, Y, X):
+        """Impose the known signs on the magnitude outputs (unscaled target space)."""
+        if getattr(self, "sign_outputs", ()):      # attribute absent in pre-KCL pickles
+            s = self._signs(X)
+            for k in self.sign_outputs:
+                Y[:, k] = s * np.maximum(Y[:, k], 0.0)
+        return Y
 
     def _build(self, n_in, n_out):
         import torch.nn as nn
@@ -218,8 +242,16 @@ class TorchMLPRegressor:
         layers.append(nn.Linear(prev, n_out))       # identity output for regression
         return nn.Sequential(*layers)
 
-    def fit(self, X, Y, X_val, Y_val):
+    def fit(self, X, Y, X_val, Y_val, score_fn=None):
         import torch
+
+        X, X_val = np.asarray(X, dtype=float), np.asarray(X_val, dtype=float)
+        Y, Y_val = np.array(Y, dtype=float), np.array(Y_val, dtype=float)
+        if self.sign_outputs:
+            k = list(self.sign_outputs)
+            agree = np.sum(np.sign(Y[:, k[0]]) * np.sign(X[:, self.sign_cols[0]] - X[:, self.sign_cols[1]]))
+            self.sign_flip_ = 1.0 if agree >= 0 else -1.0
+            Y[:, k], Y_val[:, k] = np.abs(Y[:, k]), np.abs(Y_val[:, k])
 
         torch.manual_seed(self.seed)
         dev = gpu_device()
@@ -233,7 +265,8 @@ class TorchMLPRegressor:
         opt = torch.optim.AdamW(self.net.parameters(), lr=self.lr, weight_decay=self.weight_decay)
         sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, factor=0.5, patience=self.patience // 3,
                                                            min_lr=1e-6)
-        loss_fn = torch.nn.MSELoss()
+        loss_fn = (torch.nn.HuberLoss(delta=self.huber_delta) if self.loss == "huber"
+                   else torch.nn.MSELoss())
         gen = torch.Generator(device=dev).manual_seed(self.seed)
         best_val, best_state, bad = np.inf, None, 0
         n = Xt.shape[0]
@@ -250,58 +283,161 @@ class TorchMLPRegressor:
                 tot += loss.detach() * len(b)
             self.net.eval()
             with torch.no_grad():
-                val = loss_fn(self.net(Xv), Yv).item()
+                out_v = self.net(Xv)
+                val = loss_fn(out_v, Yv).item()
+            monitor = val
+            if score_fn is not None:
+                Zp = self.y_scaler.inverse_transform(out_v.cpu().numpy().astype(float))
+                monitor = score_fn(self._post(Zp, X_val))
+                self.history.setdefault("score", []).append(monitor)
             self.history["train"].append(tot.item() / n)
             self.history["val"].append(val)
             sched.step(val)
-            if val < best_val * (1 - 1e-4):
-                best_val, bad = val, 0
+            if monitor < best_val * (1 - 1e-4):
+                best_val, bad, self.best_epoch_ = monitor, 0, epoch + 1
                 best_state = copy.deepcopy(self.net.state_dict())   # deep copy: true snapshot
             else:
                 bad += 1
                 if bad >= self.patience:
                     break
         self.net.load_state_dict(best_state)
-        self.best_val_mse_, self.epochs_ = best_val, epoch + 1
+        self.best_monitor_, self.epochs_ = best_val, epoch + 1
         self.net.cpu().eval()
         return self
 
     def predict(self, X):
         import torch
+        X = np.asarray(X, dtype=float)
         with torch.no_grad():
-            z = self.net(torch.tensor(self.x_scaler.transform(np.asarray(X)), dtype=torch.float32))
-        return self.y_scaler.inverse_transform(z.numpy().astype(float))
+            z = self.net(torch.tensor(self.x_scaler.transform(X), dtype=torch.float32))
+        return self._post(self.y_scaler.inverse_transform(z.numpy().astype(float)), X)
 
 
-def inner_split(n):
-    """Inner hold-out carved from TRAIN for MLP early stopping / config choice."""
+class EnsembleRegressor:
+    """Mean of independently trained members, in their (shared) target space."""
+
+    def __init__(self, members):
+        self.members = members
+
+    def predict(self, X):
+        return np.mean([m.predict(X) for m in self.members], axis=0)
+
+
+class TargetAdapter:
+    """Wraps a model trained on another target parameterisation (inner_tf,
+    e.g. KCLTransform) so predict() returns the standard signed-log targets
+    (outer_tf) that the rest of the pipeline and LeakagePredictor expect."""
+
+    def __init__(self, model, inner_tf, outer_tf, cfg, space):
+        self.model, self.inner_tf, self.outer_tf = model, inner_tf, outer_tf
+        self.cfg, self.space = cfg, space
+
+    def predict(self, X):
+        return self.outer_tf.transform(self.inner_tf.inverse_transform(self.model.predict(X)))
+
+    def refit(self, X, Y):
+        """Same recipe and target transform, new training data (size curve)."""
+        X = np.asarray(X, dtype=float)
+        I = self.outer_tf.inverse_transform(Y)
+        Z = self.inner_tf.transform(I)
+        n = len(mlp_members(self))
+        members = [_train_member(X, I, Z, self.cfg, self.space, self.inner_tf, k)[0] for k in range(n)]
+        return TargetAdapter(members[0] if n == 1 else EnsembleRegressor(members),
+                             self.inner_tf, self.outer_tf, self.cfg, self.space)
+
+
+def mlp_members(model):
+    """The TorchMLPRegressor(s) inside a fitted MLP model, for plots and refits."""
+    if isinstance(model, TargetAdapter):
+        model = model.model
+    if isinstance(model, EnsembleRegressor):
+        return list(model.members)
+    return [model] if isinstance(model, TorchMLPRegressor) else []
+
+
+MLP_TARGETS = {"direct": SignedLogTransform, "kcl": KCLTransform, "kcl_sign": KCLTransform}
+
+
+def inner_split(n, member=0):
+    """Inner hold-out carved from TRAIN for MLP early stopping / config choice.
+    Ensemble member k uses its own split, so together the members see all of TRAIN."""
     idx = np.arange(n)
     it, iv = train_test_split(idx, test_size=C.SEARCH_SPACES["mlp"]["inner_val_frac"],
-                              random_state=C.SEED_CV, shuffle=True)
+                              random_state=C.SEED_CV + member, shuffle=True)
     return it, iv
 
 
-def fit_mlp(X, Y, space, n_jobs=-1, log=print):
-    """Each config: train on 90 % of TRAIN, early-stop on the other 10 %; keep
-    the config with the lowest inner-validation MSE (standardised targets)."""
+def spec_score(I_true, I_pred):
+    """The spec metric in amperes: mean over the four currents of the median
+    (and 95th-percentile) relative error, in percent."""
+    err = 100.0 * np.abs(I_pred - I_true) / np.maximum(np.abs(I_true), 1e-30)
+    return {"median": float(np.mean(np.median(err, axis=0))),
+            "p95": float(np.mean(np.percentile(err, 95, axis=0)))}
+
+
+def _train_member(X, I, Z, cfg, space, inner_tf, member):
+    """Train one network of config cfg (target transform already applied: Z) on
+    TRAIN minus an inner hold-out, early-stopping on that hold-out."""
+    it, iv = inner_split(len(X), member)
+    arch = {k: cfg[k] for k in ("hidden", "activation", "dropout", "weight_decay", "lr", "batch_size")}
+    sign = ({"sign_cols": cfg["sign_cols"], "sign_outputs": (0,)} if cfg["target"] == "kcl_sign" else {})
+    m = TorchMLPRegressor(max_epochs=space["max_epochs"], patience=space["patience"],
+                          seed=C.SEED_TORCH + member, loss=cfg["loss"],
+                          huber_delta=cfg.get("huber_delta", 0.1), **arch, **sign)
+    score_fn = None
+    if cfg["monitor"] == "metric":
+        I_iv = I[iv]
+        score_fn = lambda Zp: spec_score(I_iv, inner_tf.inverse_transform(Zp))["median"]
+    m.fit(X[it], Z[it], X[iv], Z[iv], score_fn=score_fn)
+    return m, spec_score(I[iv], inner_tf.inverse_transform(m.predict(X[iv])))
+
+
+def mlp_config(cfg, space, cols):
+    """Fill a config with the space-level recipe defaults and resolve column indices."""
+    cfg = {"target": space["target"], "loss": space["loss"], "huber_delta": space["huber_delta"],
+           "monitor": space["monitor"], **cfg}
+    if cfg["target"] == "kcl_sign":
+        cfg["sign_cols"] = (cols.index("vd"), cols.index("vs"))
+    return cfg
+
+
+def fit_mlp(X, Y, space, n_jobs=-1, log=print, tf=None):
+    """Each config (architecture, target parameterisation, loss, early-stopping
+    monitor) is trained on 90 % of TRAIN and scored on the other 10 % with the
+    spec metric in amperes (mean median relative error, ties by p95), so configs
+    with different target spaces are comparable. The best config is retrained
+    n_ensemble times (different seeds and inner hold-outs) and averaged."""
     import torch
     if n_jobs > 0:
         torch.set_num_threads(n_jobs)
-    X, Y = np.asarray(X), np.asarray(Y)
-    it, iv = inner_split(len(X))
+    cols = list(X.columns)
+    X = np.asarray(X, dtype=float)
+    I = tf.inverse_transform(np.asarray(Y))
     best, trace = None, []
     for cfg in space["configs"]:
+        cfg = mlp_config(cfg, space, cols)
+        inner_tf = MLP_TARGETS[cfg["target"]]().fit(I)
         t0 = time.perf_counter()
-        m = TorchMLPRegressor(max_epochs=space["max_epochs"], patience=space["patience"], **cfg)
-        m.fit(X[it], Y[it], X[iv], Y[iv])
-        row = dict(cfg, inner_val_mse=m.best_val_mse_, final_train_mse=m.history["train"][-1],
-                   epochs=m.epochs_, seconds=round(time.perf_counter() - t0, 1), device=gpu_device())
+        m, inner = _train_member(X, I, inner_tf.transform(I), cfg, space, inner_tf, 0)
+        row = dict(cfg, inner_median_pct=inner["median"], inner_p95_pct=inner["p95"],
+                   epochs=m.epochs_, best_epoch=m.best_epoch_,
+                   seconds=round(time.perf_counter() - t0, 1), device=gpu_device())
         log(f"      {row}")
         trace.append(row)
-        if best is None or m.best_val_mse_ < best.best_val_mse_:
-            best = m
-    chosen = next(r for r in trace if r["inner_val_mse"] == best.best_val_mse_)
-    return best, [{"best": chosen, "trace": trace}]
+        if best is None or (inner["median"], inner["p95"]) < best[0]:
+            best = ((inner["median"], inner["p95"]), cfg, m, inner_tf, row)
+    _, cfg, m0, inner_tf, row = best
+    Z = inner_tf.transform(I)
+    members = [m0]
+    for k in range(1, space["n_ensemble"]):
+        t0 = time.perf_counter()
+        mk, inner = _train_member(X, I, Z, cfg, space, inner_tf, k)
+        log(f"      ensemble member {k}: inner median {inner['median']:.3f}% "
+            f"p95 {inner['p95']:.2f}% epochs {mk.epochs_} ({time.perf_counter() - t0:.0f}s)")
+        members.append(mk)
+    model = TargetAdapter(m0 if len(members) == 1 else EnsembleRegressor(members), inner_tf, tf, cfg, space)
+    return model, [{"best": row, "trace": trace, "n_ensemble": len(members),
+                    "member_epochs": [mm.epochs_ for mm in members]}]
 
 
 FITTERS = {

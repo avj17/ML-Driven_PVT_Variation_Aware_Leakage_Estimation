@@ -22,7 +22,7 @@ from sklearn.inspection import permutation_importance
 from leakage_ml import config as C
 from leakage_ml import plots
 from leakage_ml.metrics import summarize
-from leakage_ml.models import TorchMLPRegressor
+from leakage_ml.models import mlp_members
 from leakage_ml.predictor import LeakagePredictor
 from train import prepare_case
 
@@ -147,9 +147,10 @@ def main():
 
         mlp_path = C.MODELS_DIR / "candidates" / f"{case}__mlp.joblib"
         if mlp_path.exists():
-            mlp = LeakagePredictor.load(mlp_path).model
-            if isinstance(mlp, TorchMLPRegressor):
-                plots.learning_curve(mlp.history, case, C.PLOTS_DIR / f"{case}_mlp_learning_curve.png")
+            members = mlp_members(LeakagePredictor.load(mlp_path).model)
+            if members:      # first ensemble member's curve
+                plots.learning_curve(members[0].history, case, C.PLOTS_DIR / f"{case}_mlp_learning_curve.png",
+                                     loss_name="Huber" if getattr(members[0], "loss", "mse") == "huber" else "MSE")
         print(f"{case}: chosen {fam} (val median {best['median_err_pct']:.3f}%, p95 {best['p95_err_pct']:.2f}%)")
 
     test = pd.DataFrame(chosen_rows)
