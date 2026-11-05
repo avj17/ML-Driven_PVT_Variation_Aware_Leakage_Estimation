@@ -24,7 +24,7 @@ SPICE simulation. It runs in three parts:
 | Part | State |
 |---|---|
 | A: transistor models | ✅ Done. The MLP was chosen for all 4 cases, with a test median error of 0.40–0.68 % (mean over Id/Ig/Is/Ib) and R² ≥ 0.997. See [`model_training/train_4.md`](model_training/train_4.md) |
-| B: gate-level validation | ⏳ To do |
+| B: gate-level validation | ✅ Done. 5 gates × all inputs × 200 corners (3,600 ngspice runs): ML vs SPICE median error 2.75 %, p95 15.6 %, mean accuracy 95.3 %. See [`part_b_gate_level/README.md`](part_b_gate_level/README.md) |
 | C: 3-bit CLA validation | ⏳ To do |
 
 ## Folder structure
@@ -39,6 +39,15 @@ SPICE simulation. It runs in three parts:
 │   ├── {nmos,pmos}_{on,off}.net  example single-transistor netlists (Deliverable 2)
 │   ├── {NMOS,PMOS}_{ON,OFF}.csv  the four datasets (Deliverable 1)
 │   └── plot*.png                 trend plots: OFF current vs T, OFF current vs vth0, Ig vs toxe
+│
+├── part_b_gate_level/            Part B: 5 gates × all inputs × 200 corners, SPICE vs ML (see its README)
+│   ├── spice/*.cir               ngspice gate netlists: draw corners, sweep inputs, write leakage
+│   ├── spice/gates.lib           the gates as subcircuits (used by the CLA)
+│   ├── spice/models/             model card with vth0/toxe/ndep/u0/xj as .params
+│   ├── step1_collect_spice.py    check + collect the ngspice output
+│   ├── step2_ml_gates.py         ML gate leakage (gate model -> transistor models)
+│   ├── step3_evaluate_gates.py   gate results table + parity plot
+│   └── gatelib/                  gate definitions, GateModel, output parsing/checks, metrics
 │
 └── model_training/               Part A steps 2 to 5: model training and evaluation
     ├── train_4.md                full write-up: models, MLP architecture and training method, all metrics,
@@ -117,6 +126,17 @@ I = m.predict(df)   # df columns: vdd,temp,w,vd,vs,vg,vb,vth0,toxe,ndep,u0,xj �
 Loading a model on a CPU-only machine needs plain `torch` and `xgboost`; the
 CUDA builds are not required.
 
+**4. Gate-level validation (Part B)** (local machine; needs `ngspice`).
+The SPICE side is ngspice netlists; the runner runs them and then the Python ML/analysis steps:
+
+```bash
+cd part_b_gate_level
+python run_part_b.py               # spice/*.cir, then steps 1-3
+python run_part_b.py --skip-spice  # after new Part A models: redo only the ML steps
+```
+
+For a quick check set `let nrun = 5` in the five `.cir` files first.
+
 ## Method in brief
 
 - **Split:** 70 / 15 / 15 (7,000 / 1,500 / 1,500) with seed 42.
@@ -141,3 +161,26 @@ CUDA builds are not required.
 | PMOS_OFF | 0.40 % | 4.0 % | 0.999 |
 
 The full details are in [`model_training/train_4.md`](model_training/train_4.md).
+
+## Part B results in brief
+
+- **Setup:**
+  - INV, NAND2, NOR2, AND2 and OR2 at every input combination and 200 random PVT corners: 18 cases × 200 = 3,600 runs.
+  - SPICE: transistor-level ngspice netlists. Their `.control` scripts draw the corners (seed 142), apply them with `alterparam`/`reset`, `option temp` and `alter`, and sweep the inputs.
+  - ML: the four Part A models, fed each transistor's terminal voltages from the recorded SPICE node voltages (spec Step 4).
+- **Leakage** = supply power / VDD:
+  - SPICE: −I(VDD) plus the current of each input held at VDD;
+  - ML: (1/VDD)·Σ(Vds·Id + Vgs·Ig + Vbs·Ib) over the transistors.
+- **Accuracy:**
+
+  | | Median error | p95 error | Mean accuracy |
+  |---|---|---|---|
+  | All runs | 2.75 % | 15.6 % | 95.3 % |
+  | Best gate (OR2) | | | 97.0 % |
+  | Worst gate (NAND2) | | | 93.0 % |
+
+  - The main outlier is NAND2 AB=00 (two OFF NMOS in series), at 83.4 % mean accuracy.
+- **SPICE consistency:** the Part B way of setting a corner reproduces the Part A dataset currents to within 0.0005 %, so the remaining error is the ML models' own.
+- **The models are less accurate inside gates than on their own test set:** 0.4–0.7 % median error on the uniform test set, 2.75 % inside gates. Gates use the transistors at rail and stack-node voltages, which uniform sampling rarely covers; more training data there is the planned improvement.
+
+The full table (Deliverable 6), parity plot (Deliverable 7) and file-by-file description are in [`part_b_gate_level/README.md`](part_b_gate_level/README.md).
