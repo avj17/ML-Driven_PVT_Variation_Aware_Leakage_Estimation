@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+# ngspice console logs, written next to each netlist by run_part_b.py
+spice/*.log

@@ -1,0 +1,91 @@
+* INV, transistor level: leakage for A = 0, 1 at the 200 PVT corners (Part B, spec Step 3)
+*
+* Run from this folder:   ngspice_con -b inv.cir     (Linux/macOS: ngspice -b inv.cir)
+* Output: ../results/spice_inv.txt, one line per (corner, input), header first.
+*
+* Leakage = supply power / VDD = current delivered by VDD plus by every input
+* source held at VDD (an input at 0 V delivers no power).
+* Widths must match part_b_gate_level/gatelib/config.py (checked by step1_collect_spice.py).
+
+.options gmin=1e-18 abstol=1e-18 reltol=1e-6 vntol=1e-9 numdgt=12
+.include models/45nm_HP_param.pm
+
+VDD vdd 0 DC 0.9
+VA  a   0 DC 0
+
+* M<name> drain gate source body model
+Mp out a vdd vdd pmos W=180n L=45n
+Mn out a 0   0   nmos W=90n  L=45n
+
+.control
+set numdgt = 12
+
+* ---- 200 PVT corners: this block is identical in every Part B and Part C netlist ----
+* Spec Section 4: VDD 0.9 V +-10 %, T -40..125 C, vth0/toxe/ndep/u0/xj nominal +-10 %,
+* one draw shared by all NMOS and one by all PMOS. sunif() is uniform in [-1, 1].
+setseed 142
+let nc      = 200
+let c_vdd   = 0.9      * (1 + 0.1 * sunif(vector(nc)))
+let c_temp  = 42.5     + 82.5 * sunif(vector(nc))
+let c_nvth0 = 0.46893  * (1 + 0.1 * sunif(vector(nc)))
+let c_ntoxe = 1.25e-9  * (1 + 0.1 * sunif(vector(nc)))
+let c_nndep = 3.24e18  * (1 + 0.1 * sunif(vector(nc)))
+let c_nu0   = 0.054    * (1 + 0.1 * sunif(vector(nc)))
+let c_nxj   = 1.4e-8   * (1 + 0.1 * sunif(vector(nc)))
+let c_pvth0 = -0.49158 * (1 + 0.1 * sunif(vector(nc)))
+let c_ptoxe = 1.3e-9   * (1 + 0.1 * sunif(vector(nc)))
+let c_pndep = 2.44e18  * (1 + 0.1 * sunif(vector(nc)))
+let c_pu0   = 0.02     * (1 + 0.1 * sunif(vector(nc)))
+let c_pxj   = 1.4e-8   * (1 + 0.1 * sunif(vector(nc)))
+* corners simulated: set nrun to e.g. 5 for a quick check (the first corners do not change)
+let nrun = nc
+* ---- end of corner block ----
+
+echo corner a vdd temp n_vth0 n_toxe n_ndep n_u0 n_xj p_vth0 p_toxe p_ndep p_u0 p_xj v_out ileak ivdd > ../results/spice_inv.txt
+
+let k = 0
+while k lt nrun
+  * apply corner k: process via the model-card parameters, then temperature and VDD
+  let cvdd    = c_vdd[k]
+  let ctemp   = c_temp[k]
+  let cn_vth0 = c_nvth0[k]
+  let cn_toxe = c_ntoxe[k]
+  let cn_ndep = c_nndep[k]
+  let cn_u0   = c_nu0[k]
+  let cn_xj   = c_nxj[k]
+  let cp_vth0 = c_pvth0[k]
+  let cp_toxe = c_ptoxe[k]
+  let cp_ndep = c_pndep[k]
+  let cp_u0   = c_pu0[k]
+  let cp_xj   = c_pxj[k]
+  alterparam n_vth0=$&cn_vth0
+  alterparam n_toxe=$&cn_toxe
+  alterparam n_ndep=$&cn_ndep
+  alterparam n_u0=$&cn_u0
+  alterparam n_xj=$&cn_xj
+  alterparam p_vth0=$&cp_vth0
+  alterparam p_toxe=$&cp_toxe
+  alterparam p_ndep=$&cp_ndep
+  alterparam p_u0=$&cp_u0
+  alterparam p_xj=$&cp_xj
+  reset
+  option temp=$&ctemp
+  alter vdd dc = $&cvdd
+
+  foreach a 0 1
+    let vin = $a * cvdd
+    alter va dc = $&vin
+    op
+    let ileak = 0 - i(vdd) - $a * i(va)
+    let ivdd  = 0 - i(vdd)
+    let vout  = v(out)
+    echo $&k $a $&cvdd $&ctemp $&cn_vth0 $&cn_toxe $&cn_ndep $&cn_u0 $&cn_xj $&cp_vth0 $&cp_toxe $&cp_ndep $&cp_u0 $&cp_xj $&vout $&ileak $&ivdd >> ../results/spice_inv.txt
+    * drop the op plot so the loop vectors (kept in the const plot) stay current
+    destroy all
+  end
+  let k = k + 1
+end
+echo done: $&nrun corners simulated
+quit
+.endc
+.end
