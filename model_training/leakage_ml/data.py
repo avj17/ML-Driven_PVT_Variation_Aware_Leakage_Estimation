@@ -8,9 +8,11 @@ from sklearn.model_selection import train_test_split
 from . import config as C
 
 
-def load_case(case: str) -> pd.DataFrame:
-    """Read one case CSV, normalise column names and run basic sanity checks."""
-    df = pd.read_csv(C.DATA_DIR / f"{case}.csv")
+def load_case(case: str, part: str = "suffix") -> pd.DataFrame:
+    """Read one case CSV of the configured dataset (part "suffix": the main file
+    that is split into train/val/test; "extra": the train-only rows), normalise
+    column names and run basic sanity checks."""
+    df = pd.read_csv(C.DATA_DIR / f"{case}{C.DATASETS[C.DATASET][part]}.csv")
     df = df.rename(columns={"vtho": "vth0"})   # old header spelling
     missing = set(C.RAW_FEATURES + C.TARGETS) - set(df.columns)
     if missing:

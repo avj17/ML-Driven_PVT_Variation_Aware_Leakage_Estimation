@@ -10,19 +10,23 @@ was then improved. All numbers come from `results/` (the JSON files in
 
 **Short version.**
 - The MLP is the best family in all four cases on the validation set.
-- The final MLP is a 5-network ensemble. Each network predicts the channel-like current A = (Id−Is)/2 together with Ig and Ib, and Id and Is are rebuilt exactly with KCL.
-- On the test set, its median error is 0.27–0.74 % per terminal current, and 0.40–0.68 % averaged over the four currents.
-- R² (signed-log) is ≥ 0.997, R² on raw amperes is ≥ 0.998, and the current's sign is right 99.8–100 % of the time.
-- This meets the TA's target of R² > 0.99 and error < 1 % (median).
+- The final MLP (**v3**, §13) is a 5-network ensemble per case. Each network predicts the channel-like current A = (Id−Is)/2 together with Ig and Ib, and Id and Is are rebuilt exactly with KCL.
+- v3 is trained on the new dataset: transistors with drain/source junction geometry (AD/AS/PD/PS), and 37,000 training rows per case.
+- On the test set, its **mean** error is 0.06–0.40 % per terminal current and 0.13–0.29 % averaged over the four currents. The median error is 0.06–0.14 %.
+- R² is 1.000 (log and raw) and the current's sign is right in 100 % of samples.
+- This meets the target of R² > 0.99 and mean error < 1 % (TA's annotated slides, page 4) in every case and current.
 
-**Two versions of the MLP.**
+**Three versions of the MLP** (test set, average over the four currents):
 
-| Version | What it is | Test median error, NMOS_ON / NMOS_OFF / PMOS_ON / PMOS_OFF |
-|---|---|---|
-| v1 | One network per case, predicting Id, Ig, Is and Ib directly | 1.13 / 2.81 / 2.60 / 2.94 % |
-| **v2 (final)** | KCL outputs, Huber loss, early stopping on the spec metric, 5-network ensemble | **0.49 / 0.54 / 0.68 / 0.40 %** |
+| Version | Data | What it is | Median error, NMOS_ON / NMOS_OFF / PMOS_ON / PMOS_OFF | Mean error, same order |
+|---|---|---|---|---|
+| v1 | original CSVs, 7,000 training rows | One network per case, predicting Id, Ig, Is and Ib directly | 1.13 / 2.81 / 2.60 / 2.94 % | 5.27 / 5.11 / 4.45 / 5.68 % |
+| v2 | original CSVs, 7,000 training rows | KCL outputs, Huber loss, early stopping on the median error, 5-network ensemble | 0.49 / 0.54 / 0.68 / 0.40 % | 1.47 / 2.97 / 1.89 / 2.20 % |
+| **v3 (final)** | new CSVs (junction geometry), 37,000 training rows | v2 + early stopping on the **mean** error, κ-weighted loss in the OFF cases | **0.093 / 0.067 / 0.139 / 0.058 %** | **0.29 / 0.19 / 0.24 / 0.13 %** |
 
-§6 explains the error analysis that led to v2. The v1 results are kept in `results/v1/`.
+- §6 explains the error analysis that led to v2; §13 covers v3.
+- Sections 1–12 describe the model families and the v2 MLP in detail. v3 uses the same features, model code and evaluation.
+- v1 results are kept in `results/v1/`, v2 results in `results/`, and v3 results in `v3/results/`.
 
 ---
 
@@ -595,26 +599,175 @@ over-fitting to the test set.
 - **The imposed sign of A is wrong in a few samples:** 1.23 % of NMOS_OFF, 0.63 % of PMOS_OFF, 0.08 % of PMOS_ON and 0.01 % of NMOS_ON. In these, A has the opposite sign to Vd−Vs, probably because the gate-to-channel current is split unevenly between source and drain. Even with \|A\| predicted exactly, the wrong sign gives these samples a large Id/Is error: 19–30 % median in the OFF cases. They are too few to affect the median, but they add to the OFF tail (p95 and above). A possible fix is to let the network predict a signed correction to A near the sign change instead of imposing the sign everywhere.
 - **The tree models were searched more narrowly than they could be** (RF depth fixed at 16), because of GPU time. Their gap to the MLP is large enough that this does not change the choice.
 
-## 13. Files and how to reproduce
+## 13. v3 (final): junction geometry, more data, mean-error target
 
-| What | Where |
-|---|---|
-| Final models (Deliverable 5) | `saved_models/<CASE>.joblib`. Load with `LeakagePredictor.load(path).predict(df)`, which returns amperes |
-| All candidate models (on Ada) | `saved_models/candidates/` |
-| Search traces and all metrics | `results/candidates/<case>__<family>[__raw].json` |
-| Comparison table (Deliverable 4) | `results/model_comparison_val.md` / `.csv`, plus `model_comparison_val_per_target.csv` |
-| Test results (Deliverable 5) | `results/chosen_models_test.md` / `.csv` |
-| Feature ablation | `results/feature_ablation_val.md` |
-| Size curve | `results/data_size_curve.csv` |
-| Error analysis | `results/error_analysis.md` (v2) and `results/v1/error_analysis.md` (v1) |
-| Recipe study | `results/experiments/mlp_<case>.md` / `.json` |
-| v1 results | `results/v1/` |
-| Logs | `logs/` |
+The target is **mean** relative error < 1 % per current (TA's annotation), not
+the median. v2 met it on the median but not the mean, which was 1.5–3.0 %.
+
+### 13.1 New dataset (`data_set_generattion/`)
+
+| File (per case) | Rows | Content | Used for |
+|---|---|---|---|
+| `<CASE>_new.csv` | 10,000 | The **same input rows** as `<CASE>.csv` (seed 42), re-simulated with junction geometry | Train / val / test (the same 70/15/15 rows as before) |
+| `<CASE>_new_extra.csv` | 30,000 | New rows from the same distributions (seed 4242) | **Training only** |
+| `<case>_new.net` | – | Example netlists (Deliverable 2) | – |
+| `plot*_new.png` | – | KCL check and trend plots (Deliverable 3) | – |
+
+So each case has 37,000 training rows (7,000 + 30,000). Validation and test
+are the same 1,500 + 1,500 rows as before. The Deliverable 1 files stay at
+10,000 rows; the extra rows are a disclosed supplement, as allowed by the
+spec ("the number of samples may be increased … as needed").
+
+**Junction geometry** (requested by the TA): every transistor now has
+`AD = AS = W·Ldiff` and `PD = PS = 2·(W + Ldiff)`, with **Ldiff = 2·Lmin = 90 nm**.
+- Without AD/AS the netlist had no junction area, so the reverse-biased drain/source junction leakage was missing.
+- With them, Id, Ig and Is barely change (median change 0–0.3 %), but Ib changes completely in the OFF state: about 500× larger at 125 °C.
+- The old data's constant Ib of about 1e-14 A at low temperature turns out to have been an artefact of the missing junction area.
+- A useful side effect: sign(A) = sign(Vd−Vs) now holds in all but 1 of the 160,000 rows (before, it failed in up to 1.2 % of a case), which removes an error source of v2 (§12).
+
+**Body-referenced netlists.**
+- **Problem:** in the first new run, 53 % of PMOS_OFF Ib values (and 9 % of PMOS_ON Ib) were exact multiples of 2⁻⁵⁵ ≈ 2.8e-17 A, or exactly 0. ngspice solves voltages and currents together, so a branch current carries an absolute round-off of about machine-ε × the node voltage. The PMOS body sits at VDD ≈ 0.9 V, which puts about ±2.8e-17 A of floating-point noise on the tiny low-temperature body current.
+- **Fix:** each netlist now uses the **body node as ground**, i.e. every source is shifted by −Vb. BSIM4 depends only on voltage differences, so the device biases are identical: Id and Is change by ≤ 2e-6, and Ig by ≤ 0.1 % (that was round-off in the old values too). PMOS Ib becomes smooth and positive (2e-19 to 1e-17 A at low temperature), with no zeros and no false sign changes. The CSVs keep the absolute voltages of spec §4. NMOS is unchanged, because its body is already at 0 V.
+- **Metric safeguard:** relative error is undefined where the SPICE current is exactly 0. `metrics.relative_error` skips such rows and reports their count. After the fix there are none.
+
+### 13.2 v3 recipe study (`mlp_experiments.py`, `v3/results/experiments/`)
+
+Five recipes were trained on 256-256-256 SiLU, with one network each and all
+37,000 training rows. The recipe was chosen on the **inner-hold-out mean
+error** (part of TRAIN). Validation numbers are shown for information only.
+
+| Recipe | Inner-hold-out mean error, NMOS_ON / NMOS_OFF / PMOS_ON / PMOS_OFF | Val mean error, same order |
+|---|---|---|
+| v2 recipe (KCL + sign, Huber, stop on median) | 0.34 / 0.52 / 0.63 / 0.31 % | 0.30 / 0.55 / 0.26 / 0.24 % |
+| + stop on **mean** error | **0.34** / 0.52 / **0.63** / 0.30 % | 0.30 / 0.55 / 0.26 / 0.26 % |
+| + stop on mean + **κ-weighted loss** | 0.39 / **0.33** / 0.92 / **0.29** % | 0.35 / 0.33 / 0.41 / 0.22 % |
+| KCL without imposed sign, stop on mean | 0.61 / 0.72 / 0.95 / 0.70 % | 0.62 / 0.61 / 0.48 / 0.53 % |
+| KCL without imposed sign, stop on mean, κ-weighted | 0.71 / 0.49 / 1.30 / 0.46 % | 0.93 / 0.47 / 0.73 / 0.36 % |
+
+**κ-weighted loss:** each training row is weighted by κ = (\|A\|+\|S\|)/\|I\|,
+averaged over Id and Is, clipped at 50 and normalised to mean 1
+(`models.kappa_weights`). This is how strongly KCL amplifies errors in A and S
+into Id/Is, so the weighting makes the network learn A and S most precisely
+where Id or Is is a near-cancellation.
+
+**Takeaways:**
+- Even with the v2 recipe, the extra data alone cut the error by about 3–5× (val median 0.09–0.19 %, against 0.40–0.69 % for v2).
+- **The κ-weighted loss helps the OFF cases** (NMOS_OFF inner mean 0.52 → 0.33 %), where the cancellation lives. **It hurts the ON cases**, where κ ≈ 1 and the weights only add noise.
+- **Imposing the sign of A is still essential:** every unsigned variant is worse.
+- **Chosen per case** (`config.MLP_CASE_RECIPES`): KCL + sign, Huber δ = 0.1, early stopping and selection on the mean error, κ weighting in NMOS_OFF and PMOS_OFF only.
+
+### 13.3 Final v3 models
+
+- **Architecture search:** the SiLU networks 256-256-256, 512-512-256-128 and 1024-512-256. ReLU, dropout and GELU lost in every case of the v2 search and were dropped to save GPU time.
+- **Selection** is on the inner-hold-out mean error.
+- **Ensemble:** 5 members per case, as in v2 (§3.4.3), each with its own seed and hold-out.
+- **Training:** everything else is unchanged from v2: AdamW lr 2e-3, batch 256, ReduceLROnPlateau, patience 150, up to 3,000 epochs.
+
+| Case | Recipe | Chosen network | Parameters per network (× 5) | Epochs of the 5 members | Fit time |
+|---|---|---|---|---|---|
+| NMOS_ON | no κ weighting | 512-512-256-128 | 440,579 | 1592, 3000, 3000, 859, 947 | 141 min |
+| NMOS_OFF | κ-weighted | 256-256-256 | 138,243 | 741, 1339, 1498, 841, 1385 | 77 min |
+| PMOS_ON | no κ weighting | 256-256-256 | 139,011 | 1764, 3000, 346, 2026, 1475 | 110 min |
+| PMOS_OFF | κ-weighted | 256-256-256 | 138,755 | 1872, 1491, 2214, 991, 1373 | 107 min |
+
+One PMOS_ON member stopped early, after 346 epochs, and is weaker than the
+other four. The ensemble still reaches the target, but retraining that member
+is a possible small gain.
+
+Prediction takes 0.03–0.05 ms per sample for the whole ensemble.
+
+### 13.4 v3 test results (Deliverable 5; `v3/results/chosen_models_test.md`)
+
+| Case | Current | Median % | p95 % | **Mean %** | R² (log) | Sign % |
+|---|---|---|---|---|---|---|
+| NMOS_ON | Id | 0.100 | 0.61 | **0.32** | 1.000 | 100 |
+| | Ig | 0.085 | 1.04 | **0.35** | 1.000 | 100 |
+| | Is | 0.100 | 0.61 | **0.35** | 1.000 | 100 |
+| | Ib | 0.088 | 0.47 | **0.15** | 1.000 | 100 |
+| NMOS_OFF | Id | 0.063 | 0.37 | **0.40** | 1.000 | 100 |
+| | Ig | 0.038 | 0.17 | **0.06** | 1.000 | 100 |
+| | Is | 0.062 | 0.38 | **0.13** | 1.000 | 100 |
+| | Ib | 0.103 | 0.49 | **0.18** | 1.000 | 100 |
+| PMOS_ON | Id | 0.144 | 0.60 | **0.22** | 1.000 | 100 |
+| | Ig | 0.120 | 0.60 | **0.23** | 1.000 | 100 |
+| | Is | 0.144 | 0.58 | **0.31** | 1.000 | 100 |
+| | Ib | 0.150 | 0.49 | **0.19** | 1.000 | 100 |
+| PMOS_OFF | Id | 0.054 | 0.45 | **0.12** | 1.000 | 100 |
+| | Ig | 0.033 | 0.17 | **0.07** | 1.000 | 100 |
+| | Is | 0.052 | 0.40 | **0.14** | 1.000 | 100 |
+| | Ib | 0.093 | 0.52 | **0.19** | 1.000 | 100 |
+
+R² on raw amperes is ≥ 0.99995 everywhere.
+
+**v2 → v3, test, mean over the four currents:**
+
+| Case | Median % | p95 % | Worst-current p95 % | **Mean %** | Mean accuracy |
+|---|---|---|---|---|---|
+| NMOS_ON | 0.49 → **0.093** | 4.24 → **0.68** | 7.27 → **1.04** | 1.47 → **0.29** | **99.71 %** |
+| NMOS_OFF | 0.54 → **0.067** | 5.68 → **0.35** | 8.32 → **0.49** | 2.97 → **0.19** | **99.81 %** |
+| PMOS_ON | 0.68 → **0.139** | 4.86 → **0.57** | 9.67 → **0.60** | 1.89 → **0.24** | **99.76 %** |
+| PMOS_OFF | 0.40 → **0.058** | 4.03 → **0.38** | 5.67 → **0.52** | 2.20 → **0.13** | **99.87 %** |
+
+**Takeaways:**
+- **The target is met everywhere:** mean error < 1 % for every case and every current (the highest is 0.40 %, NMOS_OFF Id), and R² > 0.99.
+- **Every metric improved on v2:** median 5–8×, mean 5–17×, p95 6–16×.
+- Validation and test agree closely: val mean over the currents is 0.21 / 0.14 / 0.26 / 0.14 %, against 0.29 / 0.19 / 0.24 / 0.13 % on test.
+- **Caveat:** v2 and v3 are scored on different labels, the original and the junction-geometry data. Id, Ig and Is are essentially the same physics in both, but Ib is not.
+
+### 13.5 How much did the extra data help? (`v3/results/data_size_curve.csv`)
+
+The final v3 recipe (5-member ensemble), retrained on random subsets of the
+37,000 training rows and scored on VAL:
+
+| Training rows | NMOS_ON | NMOS_OFF | PMOS_ON | PMOS_OFF |
+|---|---|---|---|---|
+| 7,000 (= v2's training set) | 0.74 / **1.63 %** | 0.41 / 0.87 % | 0.54 / **1.88 %** | 0.50 / **1.39 %** |
+| 18,500 | 0.17 / 0.37 % | 0.10 / 0.24 % | 0.13 / 0.36 % | 0.10 / 0.26 % |
+| 37,000 | 0.092 / 0.21 % | 0.064 / 0.14 % | 0.144 / 0.26 % | 0.056 / 0.14 % |
+
+(Each cell is the validation median / **mean** error, averaged over the four
+currents. Plot: `v3/results/plots/data_size_curve.png`.)
+
+**Takeaways:**
+- **The extra data is necessary for the target.** With only the 7,000 rows of the original split, the v3 recipe misses mean < 1 % in three of the four cases (0.87–1.88 %). This is the evidence for going beyond the 10,000-row dataset.
+- **18,500 training rows already meet the target** (mean 0.24–0.37 %). 37,000 halve the mean error again, and the p95 too (0.38–0.62 %).
+- PMOS_ON's *median* is slightly lower at 18,500 than at 37,000 (0.126 vs 0.144 %). That is the weak early-stopped ensemble member of the final model (§13.3); its mean and p95 are still best at 37,000.
+
+### 13.6 Test set and limitations (v3)
+
+- **Test set:** the v3 test labels are new (junction geometry), so v3's test evaluation is the first on these labels. The test *input* rows are the same 1,500 per case as in v1/v2, and no model was trained or selected on them.
+- **Disclosure:** the extra 30,000 rows per case go beyond the 10,000-row deliverable. They are uniform draws from the spec's §4 distributions with a different seed.
+- **Remaining tail:** the largest p95 is NMOS_ON Ig (1.04 %), in deep subthreshold (§6.3).
+
+## 14. Files and how to reproduce
+
+The dataset is chosen with `LEAKAGE_DATASET`: `new` (the default, v3) reads
+`<CASE>_new.csv` + `<CASE>_new_extra.csv` and writes to `v3/`; `orig` reads
+`<CASE>.csv` and writes to `results/` and `saved_models/` (v1, v2).
+
+| What | v3 (final, `new` data) | v2 (`orig` data) |
+|---|---|---|
+| Final models (Deliverable 5). Load with `LeakagePredictor.load(path).predict(df)`, which returns amperes | `v3/saved_models/<CASE>.joblib` | `saved_models/<CASE>.joblib` |
+| Search traces and all metrics | `v3/results/candidates/<case>__mlp.json` | `results/candidates/<case>__<family>[__raw].json` |
+| Validation table (Deliverable 4) | `v3/results/model_comparison_val.md` (MLP only) | `results/model_comparison_val.md` (all 4 families) |
+| Test results (Deliverable 5) | `v3/results/chosen_models_test.md` / `.csv` | `results/chosen_models_test.md` / `.csv` |
+| Size curve | `v3/results/data_size_curve.csv` | `results/data_size_curve.csv` |
+| Recipe study | `v3/results/experiments/` | `results/experiments/` |
+| Error analysis | – | `results/error_analysis.md`, `results/v1/error_analysis.md` |
+| Plots | `v3/results/plots/` | `results/plots/` |
+| Feature ablation | – | `results/feature_ablation_val.md` |
+
+v1 results are in `results/v1/`. Logs are in `logs/` and `v3/logs/` (not in
+git). The candidate models are on Ada.
 
 ```bash
-# On Ada (GPU job): train → raw ablation → evaluate → size curve
-sbatch run_all.sh                 # everything in one job
-bash submit_by_model.sh           # or one chained job per family
-sbatch run_experiments.sh         # MLP recipe study (§6.2)
-python analyze_errors.py          # error breakdown (§6), after evaluate.py
+# Data (laptop, needs ngspice): 10,000 main + 30,000 extra rows per case, then the data check
+cd data_set_generattion && python generate_data.py --extra 30000 && python check_data.py
+
+# On Ada (GPU), v3 = default dataset "new":
+sbatch run_experiments.sh                                  # v3 recipe study (§13.2)
+MODELS=mlp STEPS="train eval size" sbatch run_all.sh      # final v3 MLPs, test evaluation, size curve
+# v2 / all four families on the original data:
+LEAKAGE_DATASET=orig sbatch run_all.sh
+python analyze_errors.py                                   # error breakdown (§6), after evaluate.py
 ```

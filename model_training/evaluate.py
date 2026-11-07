@@ -21,7 +21,7 @@ from sklearn.inspection import permutation_importance
 
 from leakage_ml import config as C
 from leakage_ml import plots
-from leakage_ml.metrics import summarize
+from leakage_ml.metrics import relative_error, summarize
 from leakage_ml.models import mlp_members
 from leakage_ml.predictor import LeakagePredictor
 from train import prepare_case
@@ -135,7 +135,7 @@ def main():
         errs = {}
         for k, t in enumerate(C.TARGETS):
             m = summarize(I_te[:, k], I_hat[:, k], Y_te[:, k], Y_hat[:, k])
-            errs[t] = 100 * np.abs(I_hat[:, k] - I_te[:, k]) / np.abs(I_te[:, k])
+            errs[t] = relative_error(I_te[:, k], I_hat[:, k])
             chosen_rows.append({"case": case, "chosen_family": fam, "target": t, **m})
         plots.parity_plot(I_te, I_hat, case, fam, "test", C.PLOTS_DIR / f"{case}_parity_test.png")
         plots.error_hist(errs, case, "test", C.PLOTS_DIR / f"{case}_error_hist_test.png")

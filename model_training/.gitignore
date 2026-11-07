@@ -2,3 +2,4 @@ saved_models/candidates/
 logs/
 __pycache__/
 *.pyc
+v3/saved_models/candidates/

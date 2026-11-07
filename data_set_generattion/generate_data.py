@@ -1,16 +1,44 @@
+"""Single-transistor SPICE datasets (Part A, step 1).
+
+    python generate_data.py                 # 4 x 10,000 rows -> <CASE>_new.csv + example netlists
+    python generate_data.py --extra 20000   # also 20,000 extra training rows per case -> <CASE>_new_extra.csv
+
+The main 10,000 rows per case reuse the original random draws (seed 42, same
+order), so their inputs are identical to the first datasets (<CASE>.csv) and
+the train/val/test split selects the same rows. The extra rows come from the
+same distributions with a different seed and are used for training only.
+
+Every transistor now has drain/source junction geometry, with diffusion
+length LDIFF = 2 * Lmin: AD = AS = W * LDIFF, PD = PS = 2 * (W + LDIFF).
+(<CASE>.csv were simulated without it, so they have no junction-area leakage.)
+The netlists use the body node as ground (see simulate_single_sample).
+"""
+import argparse
 import os
 import re
 import csv
+import shutil
 import tempfile
 import subprocess
 import numpy as np
 from concurrent.futures import ProcessPoolExecutor
 
-# Fixed random seed for reproducibility (Deliverable 9)
+# Fixed random seeds for reproducibility (Deliverable 9)
 SEED = 42
+SEED_EXTRA = 4242            # extra training rows: independent of the main draws
 NUM_SAMPLES = 10000
 L_MIN = 45e-9
+LDIFF = 2 * L_MIN            # drain/source diffusion length
 VDD_NOM = 0.9
+SUFFIX = "_new"              # output names: <CASE>_new.csv, <case>_new.net
+# On Windows, ngspice.exe is the GUI build and prints nothing to stdout; use the console build.
+NGSPICE = os.environ.get("NGSPICE") or shutil.which("ngspice_con") or "ngspice"
+
+
+def junction_geometry(w):
+    """AD/AS/PD/PS instance parameters for a transistor of width w (metres)."""
+    area, perim = w * LDIFF, 2 * (w + LDIFF)
+    return f"AD={area:.8e} AS={area:.8e} PD={perim:.8e} PS={perim:.8e}"
 
 # Nominal parameters from 45nm_HP.pm
 NOMINAL_PARAMS = {
@@ -37,24 +65,28 @@ def replace_model_params(model_text, mos_type, sampled_params):
 def save_example_netlists():
     """Saves the 4 clean example single-transistor netlists for Deliverable 2."""
     examples = [
-        ("nmos_on.net",  "NMOS_ON",  "nmos", 0.9, 0.0, 0.9, 0.0),
-        ("nmos_off.net", "NMOS_OFF", "nmos", 0.9, 0.0, 0.0, 0.0),
-        ("pmos_on.net",  "PMOS_ON",  "pmos", 0.0, 0.9, 0.0, 0.9),
-        ("pmos_off.net", "PMOS_OFF", "pmos", 0.0, 0.9, 0.9, 0.9),
+        (f"nmos_on{SUFFIX}.net",  "NMOS_ON",  "nmos", 0.9, 0.0, 0.9, 0.0),
+        (f"nmos_off{SUFFIX}.net", "NMOS_OFF", "nmos", 0.9, 0.0, 0.0, 0.0),
+        (f"pmos_on{SUFFIX}.net",  "PMOS_ON",  "pmos", 0.0, 0.9, 0.0, 0.9),
+        (f"pmos_off{SUFFIX}.net", "PMOS_OFF", "pmos", 0.0, 0.9, 0.9, 0.9),
     ]
+    w_example = 180e-9
     for fname, label, mos, vd, vs, vg, vb in examples:
         content = f"""* Deliverable 2 Example Single-Transistor Netlist: {label}
+* Absolute bias: Vd={vd} Vg={vg} Vs={vs} Vb={vb}. Ground is the body node, so every
+* source is shifted by -Vb (same device biases; avoids round-off in the body current).
 .options gmin=1e-18 abstol=1e-18 reltol=1e-6 vntol=1e-9 numdgt=12
 .temp 27.0
 
 .include "45nm_HP.pm"
 
-Vd d 0 DC {vd}
-Vg g 0 DC {vg}
-Vs s 0 DC {vs}
-Vb b 0 DC {vb}
+Vd d 0 DC {vd - vb:g}
+Vg g 0 DC {vg - vb:g}
+Vs s 0 DC {vs - vb:g}
+Vb b 0 DC {vb - vb:g}
 
-M1 d g s b {mos} W=180n L=45n
+* Junction geometry: Ldiff = 2*Lmin = 90n, AD = AS = W*Ldiff, PD = PS = 2*(W+Ldiff)
+M1 d g s b {mos} W=180n L=45n {junction_geometry(w_example)}
 
 .control
 op
@@ -68,7 +100,7 @@ quit
 """
         with open(fname, "w") as f:
             f.write(content)
-    print("Saved 4 Deliverable 2 example netlists: nmos_on.net, nmos_off.net, pmos_on.net, pmos_off.net")
+    print(f"Saved 4 Deliverable 2 example netlists: {', '.join(e[0] for e in examples)}")
 
 def simulate_single_sample(args):
     """Runs a single Ngspice simulation in batch mode and extracts Id, Ig, Is, Ib."""
@@ -83,18 +115,25 @@ def simulate_single_sample(args):
     }
     modified_model = replace_model_params(RAW_MODEL_TEXT, mos_type, sampled_p)
 
-    netlist = f"""* {case_name} Sample Simulation
+    # The netlist ground is the body node: every source is shifted by -vb. The
+    # device sees the same terminal voltage differences (all BSIM4 depends on),
+    # but a branch current solved next to a 0.9 V node carries ~1e-17 A of
+    # floating-point round-off, which swamped the tiny PMOS body current
+    # (body at VDD). For NMOS vb = 0, so nothing changes. The CSV keeps the
+    # absolute voltages of spec Section 4.
+    ref = row_dict['vb']
+    netlist = f"""* {case_name} Sample Simulation (body-referenced: all sources shifted by -vb = {-ref:.8e} V)
 .options gmin=1e-18 abstol=1e-18 reltol=1e-6 vntol=1e-9 numdgt=12
 .temp {row_dict['temp']:.6f}
 
 {modified_model}
 
-Vd d 0 DC {row_dict['vd']:.8e}
-Vg g 0 DC {row_dict['vg']:.8e}
-Vs s 0 DC {row_dict['vs']:.8e}
-Vb b 0 DC {row_dict['vb']:.8e}
+Vd d 0 DC {row_dict['vd'] - ref:.8e}
+Vg g 0 DC {row_dict['vg'] - ref:.8e}
+Vs s 0 DC {row_dict['vs'] - ref:.8e}
+Vb b 0 DC {row_dict['vb'] - ref:.8e}
 
-M1 d g s b {mos_type} W={row_dict['w']:.8e} L={L_MIN:.8e}
+M1 d g s b {mos_type} W={row_dict['w']:.8e} L={L_MIN:.8e} {junction_geometry(row_dict['w'])}
 
 .control
 op
@@ -111,7 +150,7 @@ quit
         tmp_path = tmp.name
 
     try:
-        res = subprocess.run(['ngspice', '-b', tmp_path], capture_output=True, text=True, check=True)
+        res = subprocess.run([NGSPICE, '-b', tmp_path], capture_output=True, text=True, check=True)
         out = res.stdout
         id_val = float(re.search(r'-i\(vd\)\s*=\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)', out, re.I).group(1))
         ig_val = float(re.search(r'-i\(vg\)\s*=\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)', out, re.I).group(1))
@@ -127,12 +166,11 @@ quit
     row_dict['ib'] = ib_val
     return row_dict
 
-def generate_case_dataset(case_name, mos_type, is_on, rng):
-    print(f"Generating {NUM_SAMPLES} samples for {case_name}...")
+def draw_case_inputs(mos_type, is_on, rng, n):
+    """n random input rows for one case (spec Section 4 distributions)."""
     nom = NOMINAL_PARAMS[mos_type]
-    tasks = []
-
-    for _ in range(NUM_SAMPLES):
+    rows = []
+    for _ in range(n):
         vdd = rng.uniform(0.9 * VDD_NOM, 1.1 * VDD_NOM)
         temp = rng.uniform(-40.0, 125.0)
         w = rng.uniform(1.0 * L_MIN, 8.0 * L_MIN)
@@ -159,18 +197,23 @@ def generate_case_dataset(case_name, mos_type, is_on, rng):
             'u0':   draw_pm10(nom['u0']),
             'xj':   draw_pm10(nom['xj'])
         }
-        tasks.append((case_name, mos_type, row))
+        rows.append(row)
+    return rows
 
+
+def simulate_rows(case_name, mos_type, rows, csv_filename, workers=None):
+    """Simulate every row with ngspice and write the CSV."""
+    print(f"Simulating {len(rows)} samples for {case_name} -> {csv_filename}")
+    tasks = [(case_name, mos_type, row) for row in rows]
     results = []
-    with ProcessPoolExecutor() as executor:
+    with ProcessPoolExecutor(max_workers=workers) as executor:
         for idx, res in enumerate(executor.map(simulate_single_sample, tasks, chunksize=50), 1):
             results.append(res)
-            if idx % 2000 == 0 or idx == NUM_SAMPLES:
-                print(f"  [{case_name}] Completed {idx}/{NUM_SAMPLES} simulations...")
+            if idx % 2000 == 0 or idx == len(rows):
+                print(f"  [{case_name}] Completed {idx}/{len(rows)} simulations...", flush=True)
 
     fieldnames = ['vdd', 'temp', 'w', 'vd', 'vs', 'vg', 'vb',
                   'vth0', 'toxe', 'ndep', 'u0', 'xj', 'id', 'ig', 'is', 'ib']
-    csv_filename = f"{case_name}.csv"
     with open(csv_filename, 'w', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
@@ -179,14 +222,36 @@ def generate_case_dataset(case_name, mos_type, is_on, rng):
     kcl_errors = [abs(r['id'] + r['ig'] + r['is'] + r['ib']) for r in results]
     print(f"Done -> {csv_filename} ({len(results)} rows) | Max KCL error: {max(kcl_errors):.2e} A\n")
 
+
+CASES = [
+    ("NMOS_ON",  "nmos", True),
+    ("NMOS_OFF", "nmos", False),
+    ("PMOS_ON",  "pmos", True),
+    ("PMOS_OFF", "pmos", False)
+]
+
 if __name__ == "__main__":
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--extra", type=int, default=0, help="extra training rows per case (seed SEED_EXTRA)")
+    ap.add_argument("--cases", nargs="+", default=[c[0] for c in CASES])
+    ap.add_argument("--skip-main", action="store_true", help="only generate the extra rows")
+    ap.add_argument("--limit", type=int, default=None, help="simulate only the first N rows (timing test)")
+    ap.add_argument("--workers", type=int, default=None)
+    args = ap.parse_args()
+
     save_example_netlists()
+    # Draw every case in the original order so each case gets the same inputs as before.
     rng = np.random.default_rng(SEED)
-    cases = [
-        ("NMOS_ON",  "nmos", True),
-        ("NMOS_OFF", "nmos", False),
-        ("PMOS_ON",  "pmos", True),
-        ("PMOS_OFF", "pmos", False)
-    ]
-    for case_name, mos_type, is_on in cases:
-        generate_case_dataset(case_name, mos_type, is_on, rng)
+    main_rows = {c: draw_case_inputs(m, on, rng, NUM_SAMPLES) for c, m, on in CASES}
+    rng_extra = np.random.default_rng(SEED_EXTRA)
+    extra_rows = {c: draw_case_inputs(m, on, rng_extra, args.extra) for c, m, on in CASES}
+
+    for case_name, mos_type, _ in CASES:
+        if case_name not in args.cases:
+            continue
+        if not args.skip_main:
+            simulate_rows(case_name, mos_type, main_rows[case_name][:args.limit],
+                          f"{case_name}{SUFFIX}.csv", args.workers)
+        if args.extra:
+            simulate_rows(case_name, mos_type, extra_rows[case_name][:args.limit],
+                          f"{case_name}{SUFFIX}_extra.csv", args.workers)

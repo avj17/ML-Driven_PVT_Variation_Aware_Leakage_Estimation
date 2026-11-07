@@ -18,7 +18,9 @@ class SignedLogTransform:
 
     def fit(self, I: np.ndarray):
         I = np.atleast_2d(np.asarray(I, dtype=float).T).T
-        self.i0_ = self.frac * np.percentile(np.abs(I), 1, axis=0)
+        # Percentile of the non-zero currents: some body currents are exactly 0 (PMOS_OFF Ib, new data).
+        nonzero = np.where(I != 0, np.abs(I), np.nan)
+        self.i0_ = self.frac * np.nanpercentile(nonzero, 1, axis=0)
         self.i0_ = np.maximum(self.i0_, 1e-30)
         return self
 

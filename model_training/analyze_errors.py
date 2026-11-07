@@ -58,7 +58,7 @@ def analyse(case):
         rows.append({
             "target": t, "train_median_%": np.median(e_tr), "val_median_%": np.median(e_va),
             "val_p95_%": np.percentile(e_va, 95), "sign_err_%": 100 * np.mean(np.sign(I[:, k]) != np.sign(I_hat[:, k])),
-            "decades_p1_p99": np.log10(np.percentile(np.abs(I[:, k]), 99) / np.percentile(np.abs(I[:, k]), 1)),
+            "decades_p1_p99": np.log10(np.percentile(np.abs(I[:, k]), 99) / np.percentile(np.abs(I[I[:, k] != 0, k]), 1)),
             "kcl/|I|_median_%": 100 * np.median(kcl / np.abs(I[:, k])),
             "kcl/|I|>1%_share": 100 * np.mean(kcl / np.abs(I[:, k]) > 0.01),
             "MSE_share_top1%": 100 * top[:max(1, len(top) // 100)].sum() / top.sum(),
