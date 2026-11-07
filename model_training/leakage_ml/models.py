@@ -23,6 +23,7 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import PolynomialFeatures, StandardScaler
 
 from . import config as C
+from .metrics import relative_error
 from .transforms import KCLTransform, SignedLogTransform
 
 
@@ -242,7 +243,8 @@ class TorchMLPRegressor:
         layers.append(nn.Linear(prev, n_out))       # identity output for regression
         return nn.Sequential(*layers)
 
-    def fit(self, X, Y, X_val, Y_val, score_fn=None):
+    def fit(self, X, Y, X_val, Y_val, score_fn=None, sample_weight=None, val_weight=None):
+        """sample_weight / val_weight: optional per-row loss weights (mean 1)."""
         import torch
 
         X, X_val = np.asarray(X, dtype=float), np.asarray(X_val, dtype=float)
@@ -265,8 +267,11 @@ class TorchMLPRegressor:
         opt = torch.optim.AdamW(self.net.parameters(), lr=self.lr, weight_decay=self.weight_decay)
         sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, factor=0.5, patience=self.patience // 3,
                                                            min_lr=1e-6)
-        loss_fn = (torch.nn.HuberLoss(delta=self.huber_delta) if self.loss == "huber"
-                   else torch.nn.MSELoss())
+        elem = (torch.nn.HuberLoss(delta=self.huber_delta, reduction="none") if self.loss == "huber"
+                else torch.nn.MSELoss(reduction="none"))
+        Wt = to_t(np.ones(len(X)) if sample_weight is None else sample_weight)
+        Wv = to_t(np.ones(len(X_val)) if val_weight is None else val_weight)
+        loss_fn = lambda out, y, w: (elem(out, y).mean(dim=1) * w).sum() / w.sum()
         gen = torch.Generator(device=dev).manual_seed(self.seed)
         best_val, best_state, bad = np.inf, None, 0
         n = Xt.shape[0]
@@ -277,14 +282,14 @@ class TorchMLPRegressor:
             for i in range(0, n, self.batch_size):
                 b = perm[i:i + self.batch_size]
                 opt.zero_grad(set_to_none=True)
-                loss = loss_fn(self.net(Xt[b]), Yt[b])
+                loss = loss_fn(self.net(Xt[b]), Yt[b], Wt[b])
                 loss.backward()
                 opt.step()
                 tot += loss.detach() * len(b)
             self.net.eval()
             with torch.no_grad():
                 out_v = self.net(Xv)
-                val = loss_fn(out_v, Yv).item()
+                val = loss_fn(out_v, Yv, Wv).item()
             monitor = val
             if score_fn is not None:
                 Zp = self.y_scaler.inverse_transform(out_v.cpu().numpy().astype(float))
@@ -368,11 +373,23 @@ def inner_split(n, member=0):
 
 
 def spec_score(I_true, I_pred):
-    """The spec metric in amperes: mean over the four currents of the median
-    (and 95th-percentile) relative error, in percent."""
-    err = 100.0 * np.abs(I_pred - I_true) / np.maximum(np.abs(I_true), 1e-30)
-    return {"median": float(np.mean(np.median(err, axis=0))),
-            "p95": float(np.mean(np.percentile(err, 95, axis=0)))}
+    """The spec metrics in amperes: mean over the four currents of the median,
+    95th-percentile and mean relative error, in percent."""
+    err = relative_error(I_true, I_pred)          # NaN where I_true == 0
+    return {"median": float(np.mean(np.nanmedian(err, axis=0))),
+            "p95": float(np.mean(np.nanpercentile(err, 95, axis=0))),
+            "mean": float(np.mean(np.nanmean(err, axis=0)))}
+
+
+def kappa_weights(I, w_max):
+    """Loss weight per row: how strongly KCL amplifies errors in A and S into
+    Id and Is, kappa = (|A| + |S|) / |I| averaged over Id and Is, clipped to
+    [1, w_max] and normalised to mean 1. ~1 in the ON state; large in the OFF
+    rows where Id or Is is a near-cancellation."""
+    a, s = np.abs(I[:, 0] - I[:, 2]) / 2, np.abs(I[:, 0] + I[:, 2]) / 2
+    k = 0.5 * ((a + s) / np.maximum(np.abs(I[:, 0]), 1e-30) + (a + s) / np.maximum(np.abs(I[:, 2]), 1e-30))
+    w = np.clip(k, 1.0, w_max)
+    return w / w.mean()
 
 
 def _train_member(X, I, Z, cfg, space, inner_tf, member):
@@ -385,17 +402,22 @@ def _train_member(X, I, Z, cfg, space, inner_tf, member):
                           seed=C.SEED_TORCH + member, loss=cfg["loss"],
                           huber_delta=cfg.get("huber_delta", 0.1), **arch, **sign)
     score_fn = None
-    if cfg["monitor"] == "metric":
+    if cfg["monitor"] != "loss":            # "metric" (= median, the v2 name), "median" or "mean"
+        key = "median" if cfg["monitor"] == "metric" else cfg["monitor"]
         I_iv = I[iv]
-        score_fn = lambda Zp: spec_score(I_iv, inner_tf.inverse_transform(Zp))["median"]
-    m.fit(X[it], Z[it], X[iv], Z[iv], score_fn=score_fn)
+        score_fn = lambda Zp: spec_score(I_iv, inner_tf.inverse_transform(Zp))[key]
+    w_tr = w_iv = None
+    if cfg.get("weight", "none") == "kappa":
+        w_tr, w_iv = kappa_weights(I[it], cfg["weight_max"]), kappa_weights(I[iv], cfg["weight_max"])
+    m.fit(X[it], Z[it], X[iv], Z[iv], score_fn=score_fn, sample_weight=w_tr, val_weight=w_iv)
     return m, spec_score(I[iv], inner_tf.inverse_transform(m.predict(X[iv])))
 
 
 def mlp_config(cfg, space, cols):
     """Fill a config with the space-level recipe defaults and resolve column indices."""
     cfg = {"target": space["target"], "loss": space["loss"], "huber_delta": space["huber_delta"],
-           "monitor": space["monitor"], **cfg}
+           "monitor": space["monitor"], "weight": space.get("weight", "none"),
+           "weight_max": space.get("weight_max", 50.0), **cfg}
     if cfg["target"] == "kcl_sign":
         cfg["sign_cols"] = (cols.index("vd"), cols.index("vs"))
     return cfg
@@ -420,19 +442,20 @@ def fit_mlp(X, Y, space, n_jobs=-1, log=print, tf=None):
         t0 = time.perf_counter()
         m, inner = _train_member(X, I, inner_tf.transform(I), cfg, space, inner_tf, 0)
         row = dict(cfg, inner_median_pct=inner["median"], inner_p95_pct=inner["p95"],
-                   epochs=m.epochs_, best_epoch=m.best_epoch_,
+                   inner_mean_pct=inner["mean"], epochs=m.epochs_, best_epoch=m.best_epoch_,
                    seconds=round(time.perf_counter() - t0, 1), device=gpu_device())
         log(f"      {row}")
         trace.append(row)
-        if best is None or (inner["median"], inner["p95"]) < best[0]:
-            best = ((inner["median"], inner["p95"]), cfg, m, inner_tf, row)
+        key = (inner[space.get("select", "median")], inner["p95"])
+        if best is None or key < best[0]:
+            best = (key, cfg, m, inner_tf, row)
     _, cfg, m0, inner_tf, row = best
     Z = inner_tf.transform(I)
     members = [m0]
     for k in range(1, space["n_ensemble"]):
         t0 = time.perf_counter()
         mk, inner = _train_member(X, I, Z, cfg, space, inner_tf, k)
-        log(f"      ensemble member {k}: inner median {inner['median']:.3f}% "
+        log(f"      ensemble member {k}: inner median {inner['median']:.3f}% mean {inner['mean']:.3f}% "
             f"p95 {inner['p95']:.2f}% epochs {mk.epochs_} ({time.perf_counter() - t0:.0f}s)")
         members.append(mk)
     model = TargetAdapter(m0 if len(members) == 1 else EnsembleRegressor(members), inner_tf, tf, cfg, space)

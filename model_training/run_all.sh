@@ -21,12 +21,16 @@
 set -euo pipefail
 # sbatch runs a spooled copy of this script, so $0 is not in model_training/.
 cd "${SLURM_SUBMIT_DIR:-$(dirname "$(readlink -f "$0")")}"
-mkdir -p logs
-# CLEAN=1: start from empty outputs; old logs are kept in logs/prev/ for post-mortems.
+# Outputs and step logs follow the dataset (config.DATASETS): "new" (default, v3) -> v3/,
+# "orig" (v1/v2) -> this folder.
+if [ "${LEAKAGE_DATASET:-new}" = orig ]; then OUTROOT=.; else OUTROOT=v3; fi
+LOGDIR=${LOGDIR:-$OUTROOT/logs}
+mkdir -p logs "$LOGDIR"
+# CLEAN=1: start from empty outputs of THIS dataset; old logs are kept in $LOGDIR/prev/.
 # (stale .nfs* files held open elsewhere cannot be removed; ignore them)
 if [ "${CLEAN:-0}" = 1 ]; then
-  mkdir -p logs/prev && mv logs/*.log logs/prev/ 2>/dev/null || true
-  rm -rf results saved_models 2>/dev/null || true
+  mkdir -p "$LOGDIR/prev" && mv "$LOGDIR"/*.log "$LOGDIR/prev/" 2>/dev/null || true
+  rm -rf "$OUTROOT/results" "$OUTROOT/saved_models" 2>/dev/null || true
 fi
 module load u22/python/3.12.4 2>/dev/null || true
 source "${VENV:-$HOME/DVD_project/.venv}/bin/activate"
@@ -47,8 +51,8 @@ has_step() { [[ " $STEPS " == *" $1 "* ]]; }
 train_cases() {   # $1 = log prefix, rest = train.py args
   local prefix=$1; shift
   local pids=()
-  for case in NMOS_ON NMOS_OFF PMOS_ON PMOS_OFF; do
-    python train.py --cases "$case" --n-jobs "$JOBS_PER_CASE" $EXTRA "$@" > "logs/${prefix}_${case}.log" 2>&1 &
+  for case in ${CASES:-NMOS_ON NMOS_OFF PMOS_ON PMOS_OFF}; do
+    python train.py --cases "$case" --n-jobs "$JOBS_PER_CASE" $EXTRA "$@" > "$LOGDIR/${prefix}_${case}.log" 2>&1 &
     pids+=($!)
   done
   for p in "${pids[@]}"; do wait "$p"; done
@@ -61,9 +65,9 @@ if has_step train; then train_cases "train_${TAG}" --models $MODELS; fi
 if has_step raw; then train_cases "train_raw_${RAW_MODELS// /+}" --models $RAW_MODELS --feature-set raw; fi
 
 # 3. Compare on validation, choose per case, evaluate once on test, plots.
-if has_step eval; then python evaluate.py > logs/evaluate.log 2>&1; fi
+if has_step eval; then python evaluate.py > "$LOGDIR/evaluate.log" 2>&1; fi
 
 # 4. Training-set-size learning curve for the chosen models.
-if has_step size; then python data_size_curve.py > logs/data_size_curve.log 2>&1; fi
+if has_step size; then python data_size_curve.py > "$LOGDIR/data_size_curve.log" 2>&1; fi
 
 echo "done ($STEPS): see results/ and saved_models/"

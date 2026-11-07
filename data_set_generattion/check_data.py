@@ -1,6 +1,17 @@
+"""Deliverable 3: KCL check and three trend plots.
+
+    python check_data.py          # the current dataset (<CASE>_new.csv) -> plot*_new.png
+    python check_data.py ""       # the original dataset (<CASE>.csv)   -> plot*.png
+"""
+import sys
+
 import pandas as pd
 import numpy as np
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+
+SUFFIX = sys.argv[1] if len(sys.argv) > 1 else "_new"
 
 cases = ["NMOS_ON", "NMOS_OFF", "PMOS_ON", "PMOS_OFF"]
 dfs = {}
@@ -10,7 +21,7 @@ print(f"{'Case':<12} | {'Rows':<6} | {'Mean |Id+Ig+Is+Ib| (A)':<24} | {'Max |Id+
 print("-" * 75)
 
 for c in cases:
-    df = pd.read_csv(f"{c}.csv")
+    df = pd.read_csv(f"{c}{SUFFIX}.csv")
     df['kcl_err'] = (df['id'] + df['ig'] + df['is'] + df['ib']).abs()
     dfs[c] = df
     print(f"{c:<12} | {len(df):<6} | {df['kcl_err'].mean():<24.4e} | {df['kcl_err'].max():<24.4e}")
@@ -65,7 +76,7 @@ ax.grid(True, which='both', linestyle='--', alpha=0.5)
 ax.legend()
 
 plt.tight_layout()
-plt.savefig("plot1_off_current_vs_temperature.png", dpi=300)
+plt.savefig(f"plot1_off_current_vs_temperature{SUFFIX}.png", dpi=300)
 
 
 # ============================================================
@@ -88,7 +99,7 @@ ax.grid(True, which='both', linestyle='--', alpha=0.5)
 ax.legend()
 
 plt.tight_layout()
-plt.savefig("plot2_off_current_vs_vth0.png", dpi=300)
+plt.savefig(f"plot2_off_current_vs_vth0{SUFFIX}.png", dpi=300)
 
 
 # ============================================================
@@ -114,7 +125,7 @@ ax.grid(True, which='both', linestyle='--', alpha=0.5)
 ax.legend()
 
 plt.tight_layout()
-plt.savefig("plot3_gate_current_vs_toxe.png", dpi=300)
+plt.savefig(f"plot3_gate_current_vs_toxe{SUFFIX}.png", dpi=300)
 
 
 # ============================================================
@@ -122,8 +133,6 @@ plt.savefig("plot3_gate_current_vs_toxe.png", dpi=300)
 # ============================================================
 
 print("\nSaved all three plots successfully:")
-print("1. plot1_off_current_vs_temperature.png")
-print("2. plot2_off_current_vs_vth0.png")
-print("3. plot3_gate_current_vs_toxe.png")
-
-plt.show()
+print(f"1. plot1_off_current_vs_temperature{SUFFIX}.png")
+print(f"2. plot2_off_current_vs_vth0{SUFFIX}.png")
+print(f"3. plot3_gate_current_vs_toxe{SUFFIX}.png")

@@ -17,6 +17,7 @@ import platform
 import time
 
 import numpy as np
+import pandas as pd
 
 from leakage_ml import config as C
 from leakage_ml.data import build_features, drop_uninformative, load_case, split_indices
@@ -27,11 +28,16 @@ from leakage_ml.transforms import SignedLogTransform
 
 
 def prepare_case(case, feature_set):
-    """Features, split and fitted target transform for one case (all fitted on TRAIN)."""
+    """Features, split and fitted target transform for one case (all fitted on TRAIN).
+    The main CSV is split 70/15/15; a dataset's extra rows are appended to TRAIN only."""
     df = load_case(case)
+    tr, va, te = split_indices(len(df), case)
+    if C.DATASETS[C.DATASET]["extra"]:
+        extra = load_case(case, "extra")
+        tr = np.concatenate([tr, len(df) + np.arange(len(extra))])
+        df = pd.concat([df, extra], ignore_index=True)
     X = build_features(df, C.CASES[case]["mos"], feature_set)
     I = df[C.TARGETS].to_numpy(dtype=float)
-    tr, va, te = split_indices(len(df), case)
     drop = drop_uninformative(X.iloc[tr])
     X = X.drop(columns=drop)
     tf = SignedLogTransform().fit(I[tr])
@@ -66,9 +72,13 @@ def main():
               f"features={d['X'].shape[1]} dropped={d['drop']} I0={np.array2string(d['tf'].i0_, precision=2)}")
 
         for fam in args.models:
-            print(f"  -> {fam}")
+            space = spaces[fam]
+            if fam == "mlp":         # per-case recipe chosen by the recipe study
+                space = {**space, **C.MLP_CASE_RECIPES[C.DATASET].get(case, {})}
+            print(f"  -> {fam}" + (f" recipe {({k: space[k] for k in ('target', 'loss', 'monitor', 'weight')})}"
+                                   if fam == "mlp" else ""))
             t0 = time.perf_counter()
-            model, tuning = FITTERS[fam](X_tr, Y_tr, spaces[fam], n_jobs=args.n_jobs, tf=d["tf"])
+            model, tuning = FITTERS[fam](X_tr, Y_tr, space, n_jobs=args.n_jobs, tf=d["tf"])
             fit_s = time.perf_counter() - t0
 
             t1 = time.perf_counter()

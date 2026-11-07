@@ -14,14 +14,16 @@
 set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-$(dirname "$(readlink -f "$0")")}"
 mkdir -p logs
+if [ "${LEAKAGE_DATASET:-new}" = orig ]; then LOGDIR=logs; else LOGDIR=v3/logs; fi
+mkdir -p "$LOGDIR"
 . ~/DVD_project/.venv/bin/activate
 export PYTHONUNBUFFERED=1 REQUIRE_GPU=1
 python -c "import torch; assert torch.cuda.is_available(); print(torch.cuda.get_device_name(0))"
 
 EXTRA=""; [ "${QUICK:-0}" = 1 ] && EXTRA="--quick"
 pids=()
-for c in NMOS_ON NMOS_OFF PMOS_ON PMOS_OFF; do
-  python mlp_experiments.py --cases "$c" $EXTRA > "logs/exp_${c}.log" 2>&1 &
+for c in ${CASES:-NMOS_ON NMOS_OFF PMOS_ON PMOS_OFF}; do
+  python mlp_experiments.py --cases "$c" $EXTRA > "$LOGDIR/exp_${c}.log" 2>&1 &
   pids+=($!)
 done
 rc=0

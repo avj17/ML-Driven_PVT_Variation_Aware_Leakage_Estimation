@@ -31,6 +31,7 @@ def error_hist(errs: dict, case, split, path):
     fig, ax = plt.subplots(figsize=(7, 4.5))
     bins = np.logspace(-4, 3, 60)
     for t, e in errs.items():
+        e = np.asarray(e)[np.isfinite(e)]          # rows with I_true == 0 have no relative error
         ax.hist(np.clip(e, 1e-4, 1e3), bins=bins, histtype="step", lw=1.5, label=t)
     ax.set_xscale("log"); ax.set_xlabel("relative error (%)"); ax.set_ylabel("count")
     ax.set_title(f"{case}: relative error distribution ({split} set)")

@@ -1,0 +1,25 @@
+* Deliverable 2 Example Single-Transistor Netlist: PMOS_ON
+* Absolute bias: Vd=0.0 Vg=0.0 Vs=0.9 Vb=0.9. Ground is the body node, so every
+* source is shifted by -Vb (same device biases; avoids round-off in the body current).
+.options gmin=1e-18 abstol=1e-18 reltol=1e-6 vntol=1e-9 numdgt=12
+.temp 27.0
+
+.include "45nm_HP.pm"
+
+Vd d 0 DC -0.9
+Vg g 0 DC -0.9
+Vs s 0 DC 0
+Vb b 0 DC 0
+
+* Junction geometry: Ldiff = 2*Lmin = 90n, AD = AS = W*Ldiff, PD = PS = 2*(W+Ldiff)
+M1 d g s b pmos W=180n L=45n AD=1.62000000e-14 AS=1.62000000e-14 PD=5.40000000e-07 PS=5.40000000e-07
+
+.control
+op
+print -i(Vd)
+print -i(Vg)
+print -i(Vs)
+print -i(Vb)
+quit
+.endc
+.end
