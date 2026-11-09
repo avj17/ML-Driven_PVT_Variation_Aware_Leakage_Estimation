@@ -14,8 +14,10 @@ VDD vdd 0 DC 0.9
 VA  a   0 DC 0
 
 * M<name> drain gate source body model
-Mp out a vdd vdd pmos W=180n L=45n
-Mn out a 0   0   nmos W=90n  L=45n
+* Junction geometry as in the v3 Part A data: Ldiff = 2*Lmin = 90n,
+* AD = AS = W*Ldiff, PD = PS = 2*(W+Ldiff)
+Mp out a vdd vdd pmos W=180n L=45n AD=1.62e-14 AS=1.62e-14 PD=5.4e-07 PS=5.4e-07
+Mn out a 0   0   nmos W=90n  L=45n AD=8.1e-15 AS=8.1e-15 PD=3.6e-07 PS=3.6e-07
 
 .control
 set numdgt = 12

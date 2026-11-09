@@ -1,14 +1,14 @@
 """Step 2 (spec Step 4): ML leakage for the same gates, inputs and corners as the SPICE runs.
 
 Uses only the four Part A transistor models (model_training/saved_models),
-through the gate model gatelib.ml_gate.GateModel. Two predictions per run:
-  ml_ileak          node voltages pre-recorded by the gate-level SPICE runs (spec Step 4)
-  ml_ileak_mlnodes  node voltages solved by KCL on the transistor models, so no
-                    SPICE input at all; these are the "ML internal node voltages"
-                    the spec asks to record (ml_v_*)
+through the gate model gatelib.ml_gate.GateModel:
+  ml_ileak   ML leakage, with the node voltages pre-recorded by the gate-level
+             SPICE runs (spec Step 4)
+  ml_v_*     ML internal node voltages, solved by KCL on the transistor models
+             (spec Section 5 asks to record the node voltages from both SPICE and ML)
 
     python step2_ml_gates.py
-    python step2_ml_gates.py --no-solve     # skip the ML node solve (faster)
+    python step2_ml_gates.py --no-solve     # skip the ML node-voltage solve (faster)
 
 Output
     results/gate_results.csv   one row per (gate, inputs, corner): corner
@@ -49,15 +49,14 @@ def main():
             cs = corners.loc[s["corner"]].reset_index()
             t0 = time.perf_counter()
 
-            s["ml_ileak"], s["ml_ivdd"], _ = gate_spice_nodes.predict(gate.name, bits, cs)
-            msg = f"spice nodes: median err {leak_metrics(s['spice_ileak'], s['ml_ileak'])['median_err_pct']:.2f} %"
+            s["ml_ileak"], _, _ = gate_spice_nodes.predict(gate.name, bits, cs)
+            m = leak_metrics(s["spice_ileak"], s["ml_ileak"])
+            msg = f"median err {m['median_err_pct']:.2f} %, p95 {m['p95_err_pct']:.2f} %"
 
             if not args.no_solve:
-                s["ml_ileak_mlnodes"], s["ml_ivdd_mlnodes"], V = gate_ml_nodes.predict(gate.name, bits, cs)
+                _, _, V = gate_ml_nodes.predict(gate.name, bits, cs)
                 for n in ALL_NODES:
                     s[f"ml_v_{n}"] = V[n] if n in gate.nodes else np.nan
-                msg += (f" | ML nodes: median err "
-                        f"{leak_metrics(s['spice_ileak'], s['ml_ileak_mlnodes'])['median_err_pct']:.2f} %")
             print(f"{gate.name:5s} {bits_str(bits):2s} ({len(s)} corners, {time.perf_counter() - t0:.1f} s)  {msg}",
                   flush=True)
             parts.append(s)

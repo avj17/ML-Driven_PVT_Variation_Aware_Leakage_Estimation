@@ -16,12 +16,14 @@ VB  b   0 DC 0
 
 * M<name> drain gate source body model
 * NOR2 stage (output n1; y = node between the series PMOS), then INV
-Mnor_pa  y   a  vdd vdd pmos W=360n L=45n
-Mnor_pb  n1  b  y   vdd pmos W=360n L=45n
-Mnor_na  n1  a  0   0   nmos W=90n  L=45n
-Mnor_nb  n1  b  0   0   nmos W=90n  L=45n
-Minv_p   out n1 vdd vdd pmos W=180n L=45n
-Minv_n   out n1 0   0   nmos W=90n  L=45n
+* Junction geometry as in the v3 Part A data: Ldiff = 2*Lmin = 90n,
+* AD = AS = W*Ldiff, PD = PS = 2*(W+Ldiff)
+Mnor_pa  y   a  vdd vdd pmos W=360n L=45n AD=3.24e-14 AS=3.24e-14 PD=9e-07 PS=9e-07
+Mnor_pb  n1  b  y   vdd pmos W=360n L=45n AD=3.24e-14 AS=3.24e-14 PD=9e-07 PS=9e-07
+Mnor_na  n1  a  0   0   nmos W=90n  L=45n AD=8.1e-15 AS=8.1e-15 PD=3.6e-07 PS=3.6e-07
+Mnor_nb  n1  b  0   0   nmos W=90n  L=45n AD=8.1e-15 AS=8.1e-15 PD=3.6e-07 PS=3.6e-07
+Minv_p   out n1 vdd vdd pmos W=180n L=45n AD=1.62e-14 AS=1.62e-14 PD=5.4e-07 PS=5.4e-07
+Minv_n   out n1 0   0   nmos W=90n  L=45n AD=8.1e-15 AS=8.1e-15 PD=3.6e-07 PS=3.6e-07
 
 .control
 set numdgt = 12

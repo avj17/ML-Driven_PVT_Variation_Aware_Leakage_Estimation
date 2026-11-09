@@ -1,35 +1,34 @@
 """Step 3 (spec Step 5): accuracy of the ML gate leakage against SPICE.
 
-    python step3_evaluate_gates.py                 # total leakage (supply power / VDD)
-    python step3_evaluate_gates.py --metric vdd    # current from the VDD source only
+    python step3_evaluate_gates.py
 
 Outputs (results/)
-    gate_results_table.md / .csv          Deliverable 6: per gate and input case (SPICE nodes)
-    gate_results_table_mlnodes.csv        the same with ML-solved node voltages
-    node_voltages.csv                     SPICE vs ML-solved node voltages
-    plots/gate_parity.png                 Deliverable 7: ML vs SPICE, all runs, log axes
-    plots/gate_parity_mlnodes.png         the same with ML-solved node voltages
-    plots/gate_error_vs_corner.png        |error| vs temperature, VDD, vth0, toxe
+    gate_results_table.md / .csv     Deliverable 6: per gate and input case, the SPICE
+                                     median, ML median, bias, median error, p95 error,
+                                     plus mean accuracy (the spec's 99 % target)
+    node_voltages.csv                SPICE vs ML internal node voltages (spec Section 5:
+                                     "the internal node voltages from both")
+    plots/gate_parity.png            Deliverable 7: ML vs SPICE, all runs, log axes
+    plots/gate_error_vs_corner.png   |error| vs temperature, VDD, vth0, toxe (report: error analysis)
 """
-import argparse
-
 import pandas as pd
 
 from gatelib import config as C
 from gatelib.gates import GATES
-from gatelib.report import (error_vs_corner_plot, leak_metrics, metrics_table, parity_plot,
-                            signed_err_pct, to_md)
+from gatelib.report import error_vs_corner_plot, leak_metrics, metrics_table, parity_plot, signed_err_pct, to_md
 
-METRICS = {"total": ("spice_ileak", "ml_ileak"), "vdd": ("spice_ivdd", "ml_ivdd")}
-COLS = ["gate", "inputs", "n", "spice_median_A", "ml_median_A", "bias_pct",
-        "median_err_pct", "p95_err_pct", "mean_err_pct", "max_err_pct", "mean_accuracy_pct"]
+SPICE_COL, ML_COL = "spice_ileak", "ml_ileak"
+# Deliverable 6 columns, plus mean accuracy for the spec's "99 % mean accuracy" target
+COLS = ["gate", "inputs", "spice_median_A", "ml_median_A", "bias_pct",
+        "median_err_pct", "p95_err_pct", "mean_accuracy_pct"]
+SUMMARY_COLS = ["gate", "median_err_pct", "p95_err_pct", "mean_accuracy_pct"]
 
 
-def results_table(df, spice_col, ml_col):
+def results_table(df):
     """Per (gate, inputs) rows, then one row per gate and an overall row."""
-    case = metrics_table(df, ["gate", "inputs"], spice_col, ml_col)
-    per_gate = metrics_table(df, ["gate"], spice_col, ml_col).assign(inputs="all")
-    overall = pd.DataFrame([{"gate": "ALL", "inputs": "all", **leak_metrics(df[spice_col], df[ml_col])}])
+    case = metrics_table(df, ["gate", "inputs"], SPICE_COL, ML_COL)
+    per_gate = metrics_table(df, ["gate"], SPICE_COL, ML_COL).assign(inputs="all")
+    overall = pd.DataFrame([{"gate": "ALL", "inputs": "all", **leak_metrics(df[SPICE_COL], df[ML_COL])}])
     return pd.concat([case, per_gate, overall], ignore_index=True)[COLS]
 
 
@@ -45,53 +44,44 @@ def node_table(df):
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--metric", choices=list(METRICS), default="total")
-    args = ap.parse_args()
-
     if not C.GATE_RESULTS_CSV.exists():
         raise SystemExit(f"{C.GATE_RESULTS_CSV} not found; run step2_ml_gates.py first.")
     df = pd.read_csv(C.GATE_RESULTS_CSV, dtype={"inputs": str})
     C.PLOTS_DIR.mkdir(parents=True, exist_ok=True)
-    spice_col, ml_col = METRICS[args.metric]
-    suffix = "" if args.metric == "total" else "_vdd"
-    has_solve = f"{ml_col}_mlnodes" in df.columns
-    label = {"total": "total leakage (supply power / VDD)", "vdd": "VDD supply current"}[args.metric]
+    df["err_pct"] = signed_err_pct(df[SPICE_COL], df[ML_COL])
 
-    df["case"] = df["gate"] + " " + df["inputs"]
-    df["err_pct"] = signed_err_pct(df[spice_col], df[ml_col])
+    table = results_table(df)
+    table.to_csv(C.RESULTS_DIR / "gate_results_table.csv", index=False)
+    summary = table[table["inputs"] == "all"][SUMMARY_COLS]
+    md = ["# Gate results: total leakage (supply power / VDD), ML vs SPICE\n",
+          "ML uses the internal node voltages pre-recorded by the gate-level SPICE runs (spec Step 4).",
+          "Bias = mean signed relative error (ML - SPICE) / SPICE. Errors are |relative errors| in %.",
+          "Mean accuracy = 100 - mean |relative error|.\n",
+          to_md(table), "",
+          "## Summary\n", to_md(summary), ""]
 
-    table = results_table(df, spice_col, ml_col)
-    table.to_csv(C.RESULTS_DIR / f"gate_results_table{suffix}.csv", index=False)
-    md = [f"# Gate results: {label}, ML vs SPICE\n",
-          "Bias = mean signed relative error (ML - SPICE) / SPICE. Errors are |relative errors| in %.\n",
-          "## ML with SPICE-recorded node voltages (spec Step 4)\n", to_md(table), ""]
-
-    parity_plot(df[spice_col], df[ml_col], df["gate"],
-                f"Gate leakage, ML vs SPICE ({len(df)} runs)", C.PLOTS_DIR / f"gate_parity{suffix}.png")
+    parity_plot(df[SPICE_COL], df[ML_COL], df["gate"],
+                f"Gate leakage, ML vs SPICE ({len(df)} runs)", C.PLOTS_DIR / "gate_parity.png")
     error_vs_corner_plot(df, "err_pct", df["gate"], "Gate leakage |error| vs corner",
-                         C.PLOTS_DIR / f"gate_error_vs_corner{suffix}.png")
+                         C.PLOTS_DIR / "gate_error_vs_corner.png")
 
-    if has_solve:
-        t2 = results_table(df, spice_col, f"{ml_col}_mlnodes")
-        t2.to_csv(C.RESULTS_DIR / f"gate_results_table_mlnodes{suffix}.csv", index=False)
+    if any(c.startswith("ml_v_") for c in df.columns):
         nodes = node_table(df)
         nodes.to_csv(C.RESULTS_DIR / "node_voltages.csv", index=False)
-        md += ["## ML with ML-solved node voltages (no SPICE input)\n", to_md(t2), "",
-               "## Node voltages: SPICE vs ML-solved\n", to_md(nodes), ""]
-        parity_plot(df[spice_col], df[f"{ml_col}_mlnodes"], df["gate"],
-                    "Gate leakage, ML (ML-solved nodes) vs SPICE",
-                    C.PLOTS_DIR / f"gate_parity_mlnodes{suffix}.png")
+        md += ["## Internal node voltages: SPICE vs ML\n", to_md(nodes), ""]
 
     worst = df.reindex(df["err_pct"].abs().sort_values(ascending=False).index).head(15)
-    md += ["## 15 largest errors (SPICE nodes)\n",
+    md += ["## 15 largest errors\n",
            to_md(worst[["gate", "inputs", "corner", "vdd", "temp", "n_vth0", "p_vth0",
-                        spice_col, ml_col, "err_pct"]]), ""]
-    (C.RESULTS_DIR / f"gate_results_table{suffix}.md").write_text("\n".join(md), encoding="utf-8")
+                        SPICE_COL, ML_COL, "err_pct"]]), ""]
+    (C.RESULTS_DIR / "gate_results_table.md").write_text("\n".join(md), encoding="utf-8")
 
+    fmt = lambda v: f"{v:.4g}"  # noqa: E731
     with pd.option_context("display.width", 200, "display.max_columns", 20):
-        print(table.to_string(index=False, float_format=lambda v: f"{v:.4g}"))
-    print(f"\n-> {C.RESULTS_DIR / f'gate_results_table{suffix}.md'} and plots in {C.PLOTS_DIR}")
+        print(table.to_string(index=False, float_format=fmt))
+        print("\nSummary")
+        print(summary.to_string(index=False, float_format=fmt))
+    print(f"\n-> {C.RESULTS_DIR / 'gate_results_table.md'} and plots in {C.PLOTS_DIR}")
 
 
 if __name__ == "__main__":

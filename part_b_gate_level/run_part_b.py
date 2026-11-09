@@ -2,7 +2,7 @@
   1. ngspice: spice/{inv,nand2,nor2,and2,or2}.cir  (the SPICE reference, ngspice code)
   2. step1_collect_spice.py   check and collect the ngspice output
   3. step2_ml_gates.py        ML gate leakage from the transistor models
-  4. step3_evaluate_gates.py  tables and plots (total leakage, then VDD current)
+  4. step3_evaluate_gates.py  results table, summary and plots
 
     python run_part_b.py
     python run_part_b.py --skip-spice     # reuse results/spice_*.txt from an earlier ngspice run
@@ -31,7 +31,6 @@ if not args.skip_spice:
         run_netlist(C.SPICE_DIR / f"{name.lower()}.cir")
         print(f"    {time.perf_counter() - t0:.0f} s", flush=True)
 
-for step in (["step1_collect_spice.py"], ["step2_ml_gates.py"], ["step3_evaluate_gates.py"],
-             ["step3_evaluate_gates.py", "--metric", "vdd"]):
+for step in (["step1_collect_spice.py"], ["step2_ml_gates.py"], ["step3_evaluate_gates.py"]):
     print(f"\n===== {' '.join(step)} =====", flush=True)
     subprocess.run([sys.executable, str(C.PART_B / step[0]), *step[1:]], check=True, cwd=C.PART_B)

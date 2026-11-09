@@ -32,6 +32,14 @@ class Fet:
     def w(self):
         return self.w_mult * C.L_MIN
 
+    @property
+    def junction_area(self):          # AD = AS
+        return self.w * C.LDIFF
+
+    @property
+    def junction_perimeter(self):     # PD = PS
+        return 2 * (self.w + C.LDIFF)
+
 
 @dataclass(frozen=True)
 class Gate:

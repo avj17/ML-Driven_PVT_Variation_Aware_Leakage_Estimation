@@ -4,44 +4,46 @@
 * side uses; step1_collect_spice.py checks that all three agree.
 * Ports: inputs, out, vdd. Body: NMOS at 0, PMOS at vdd. L = 45 nm.
 * M<name> drain gate source body model
+* Junction geometry as in the v3 Part A data: Ldiff = 2*Lmin = 90n,
+* AD = AS = W*Ldiff, PD = PS = 2*(W+Ldiff)
 
 .subckt INV a out vdd
-Mp out a vdd vdd pmos W=180n L=45n
-Mn out a 0   0   nmos W=90n  L=45n
+Mp out a vdd vdd pmos W=180n L=45n AD=1.62e-14 AS=1.62e-14 PD=5.4e-07 PS=5.4e-07
+Mn out a 0   0   nmos W=90n  L=45n AD=8.1e-15 AS=8.1e-15 PD=3.6e-07 PS=3.6e-07
 .ends INV
 
 * x = node between the series NMOS
 .subckt NAND2 a b out vdd
-Mpa out a vdd vdd pmos W=180n L=45n
-Mpb out b vdd vdd pmos W=180n L=45n
-Mna out a x   0   nmos W=180n L=45n
-Mnb x   b 0   0   nmos W=180n L=45n
+Mpa out a vdd vdd pmos W=180n L=45n AD=1.62e-14 AS=1.62e-14 PD=5.4e-07 PS=5.4e-07
+Mpb out b vdd vdd pmos W=180n L=45n AD=1.62e-14 AS=1.62e-14 PD=5.4e-07 PS=5.4e-07
+Mna out a x   0   nmos W=180n L=45n AD=1.62e-14 AS=1.62e-14 PD=5.4e-07 PS=5.4e-07
+Mnb x   b 0   0   nmos W=180n L=45n AD=1.62e-14 AS=1.62e-14 PD=5.4e-07 PS=5.4e-07
 .ends NAND2
 
 * y = node between the series PMOS
 .subckt NOR2 a b out vdd
-Mpa y   a vdd vdd pmos W=360n L=45n
-Mpb out b y   vdd pmos W=360n L=45n
-Mna out a 0   0   nmos W=90n  L=45n
-Mnb out b 0   0   nmos W=90n  L=45n
+Mpa y   a vdd vdd pmos W=360n L=45n AD=3.24e-14 AS=3.24e-14 PD=9e-07 PS=9e-07
+Mpb out b y   vdd pmos W=360n L=45n AD=3.24e-14 AS=3.24e-14 PD=9e-07 PS=9e-07
+Mna out a 0   0   nmos W=90n  L=45n AD=8.1e-15 AS=8.1e-15 PD=3.6e-07 PS=3.6e-07
+Mnb out b 0   0   nmos W=90n  L=45n AD=8.1e-15 AS=8.1e-15 PD=3.6e-07 PS=3.6e-07
 .ends NOR2
 
 * AND2 = NAND2 (output n1) + INV
 .subckt AND2 a b out vdd
-Mnand_pa n1  a  vdd vdd pmos W=180n L=45n
-Mnand_pb n1  b  vdd vdd pmos W=180n L=45n
-Mnand_na n1  a  x   0   nmos W=180n L=45n
-Mnand_nb x   b  0   0   nmos W=180n L=45n
-Minv_p   out n1 vdd vdd pmos W=180n L=45n
-Minv_n   out n1 0   0   nmos W=90n  L=45n
+Mnand_pa n1  a  vdd vdd pmos W=180n L=45n AD=1.62e-14 AS=1.62e-14 PD=5.4e-07 PS=5.4e-07
+Mnand_pb n1  b  vdd vdd pmos W=180n L=45n AD=1.62e-14 AS=1.62e-14 PD=5.4e-07 PS=5.4e-07
+Mnand_na n1  a  x   0   nmos W=180n L=45n AD=1.62e-14 AS=1.62e-14 PD=5.4e-07 PS=5.4e-07
+Mnand_nb x   b  0   0   nmos W=180n L=45n AD=1.62e-14 AS=1.62e-14 PD=5.4e-07 PS=5.4e-07
+Minv_p   out n1 vdd vdd pmos W=180n L=45n AD=1.62e-14 AS=1.62e-14 PD=5.4e-07 PS=5.4e-07
+Minv_n   out n1 0   0   nmos W=90n  L=45n AD=8.1e-15 AS=8.1e-15 PD=3.6e-07 PS=3.6e-07
 .ends AND2
 
 * OR2 = NOR2 (output n1) + INV
 .subckt OR2 a b out vdd
-Mnor_pa  y   a  vdd vdd pmos W=360n L=45n
-Mnor_pb  n1  b  y   vdd pmos W=360n L=45n
-Mnor_na  n1  a  0   0   nmos W=90n  L=45n
-Mnor_nb  n1  b  0   0   nmos W=90n  L=45n
-Minv_p   out n1 vdd vdd pmos W=180n L=45n
-Minv_n   out n1 0   0   nmos W=90n  L=45n
+Mnor_pa  y   a  vdd vdd pmos W=360n L=45n AD=3.24e-14 AS=3.24e-14 PD=9e-07 PS=9e-07
+Mnor_pb  n1  b  y   vdd pmos W=360n L=45n AD=3.24e-14 AS=3.24e-14 PD=9e-07 PS=9e-07
+Mnor_na  n1  a  0   0   nmos W=90n  L=45n AD=8.1e-15 AS=8.1e-15 PD=3.6e-07 PS=3.6e-07
+Mnor_nb  n1  b  0   0   nmos W=90n  L=45n AD=8.1e-15 AS=8.1e-15 PD=3.6e-07 PS=3.6e-07
+Minv_p   out n1 vdd vdd pmos W=180n L=45n AD=1.62e-14 AS=1.62e-14 PD=5.4e-07 PS=5.4e-07
+Minv_n   out n1 0   0   nmos W=90n  L=45n AD=8.1e-15 AS=8.1e-15 PD=3.6e-07 PS=3.6e-07
 .ends OR2

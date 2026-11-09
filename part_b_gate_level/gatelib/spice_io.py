@@ -72,8 +72,16 @@ def _value(tok):
     return float(m.group(1)) * SUFFIX.get(m.group(2), 1.0)
 
 
+def _geometry_key(w, ad, as_, pd, ps):
+    """W/L, junction areas in 1e-18 m^2 and perimeters in nm, rounded so the
+    netlist's printed values compare equal to the computed ones."""
+    area = lambda a: None if a is None else round(a / 1e-18)
+    perim = lambda p: None if p is None else round(p * 1e9, 1)
+    return (round(w / C.L_MIN, 3), area(ad), area(as_), perim(pd), perim(ps))
+
+
 def mosfets(lines, rename=None):
-    """Multiset of (type, d, g, s, b, W/L) from MOSFET cards."""
+    """Multiset of (type, d, g, s, b, W/L, AD, AS, PD, PS) from MOSFET cards."""
     r = rename or {}
     out = Counter()
     for ln in lines:
@@ -81,13 +89,15 @@ def mosfets(lines, rename=None):
         if not t or t[0][0].lower() != "m":
             continue
         d, g, s, b, mos = (r.get(x.lower(), x.lower()) for x in t[1:6])
-        w = next(_value(x.split("=")[1]) for x in t[6:] if x.lower().startswith("w="))
-        out[(mos, d, g, s, b, round(w / C.L_MIN, 3))] += 1
+        p = {k.lower(): _value(v) for k, v in (x.split("=", 1) for x in t[6:] if "=" in x)}
+        out[(mos, d, g, s, b) + _geometry_key(p["w"], p.get("ad"), p.get("as"), p.get("pd"), p.get("ps"))] += 1
     return out
 
 
 def expected_mosfets(gate):
-    return Counter((f.mos, f.d, f.g, f.s, f.b, round(f.w_mult, 3)) for f in gate.fets)
+    return Counter((f.mos, f.d, f.g, f.s, f.b)
+                   + _geometry_key(f.w, f.junction_area, f.junction_area, f.junction_perimeter, f.junction_perimeter)
+                   for f in gate.fets)
 
 
 def check_gate_netlist(gate, path):

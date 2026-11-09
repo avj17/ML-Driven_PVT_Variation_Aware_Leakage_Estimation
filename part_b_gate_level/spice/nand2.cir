@@ -15,10 +15,12 @@ VA  a   0 DC 0
 VB  b   0 DC 0
 
 * M<name> drain gate source body model; x = node between the series NMOS
-Mpa out a vdd vdd pmos W=180n L=45n
-Mpb out b vdd vdd pmos W=180n L=45n
-Mna out a x   0   nmos W=180n L=45n
-Mnb x   b 0   0   nmos W=180n L=45n
+* Junction geometry as in the v3 Part A data: Ldiff = 2*Lmin = 90n,
+* AD = AS = W*Ldiff, PD = PS = 2*(W+Ldiff)
+Mpa out a vdd vdd pmos W=180n L=45n AD=1.62e-14 AS=1.62e-14 PD=5.4e-07 PS=5.4e-07
+Mpb out b vdd vdd pmos W=180n L=45n AD=1.62e-14 AS=1.62e-14 PD=5.4e-07 PS=5.4e-07
+Mna out a x   0   nmos W=180n L=45n AD=1.62e-14 AS=1.62e-14 PD=5.4e-07 PS=5.4e-07
+Mnb x   b 0   0   nmos W=180n L=45n AD=1.62e-14 AS=1.62e-14 PD=5.4e-07 PS=5.4e-07
 
 .control
 set numdgt = 12

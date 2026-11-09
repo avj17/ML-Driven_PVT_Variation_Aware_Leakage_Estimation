@@ -18,6 +18,10 @@ For one gate, input combination and a batch of corners:
      accurate at Vds ~ 0. Here that current is multiplied by the tiny Vds, so the
      leakage comes from the OFF transistors (large Vds) and the gate currents.
      Writing it relative to the source assumes Is = -(Id + Ig + Ib) (KCL).
+
+ON transistors sit at |Vds| ~ 0, outside the training data of one Part A
+feature, so the models are evaluated at |Vds| >= config.VDS_FLOOR (see
+fet_currents).
 """
 import sys
 import warnings
@@ -57,13 +61,26 @@ def rail_voltages(gate, bits, corners):
     return V
 
 
-def _fet_frame(fet, corners, V):
+def _eval_drain(fet, V):
+    """Drain voltage at which to evaluate the model: the true one, or, where
+    |Vds| < VDS_FLOOR, the source voltage +/- VDS_FLOOR (keeping the sign of
+    Vds; for Vds == 0, moving towards the inside of [0, VDD]). See
+    config.VDS_FLOOR for why."""
+    vd, vs = np.asarray(V[fet.d], dtype=float), np.asarray(V[fet.s], dtype=float)
+    vds = vd - vs
+    small = np.abs(vds) < C.VDS_FLOOR
+    inward = np.where(vs > 0.5 * V["vdd"], -1.0, 1.0)
+    direction = np.where(vds != 0, np.sign(vds), inward)
+    return np.where(small, vs + direction * C.VDS_FLOOR, vd), small
+
+
+def _fet_frame(fet, corners, V, vd):
     pre = "n_" if fet.mos == "nmos" else "p_"
     df = pd.DataFrame({
         "vdd": corners["vdd"].to_numpy(dtype=float),
         "temp": corners["temp"].to_numpy(dtype=float),
         "w": fet.w,
-        "vd": V[fet.d], "vs": V[fet.s], "vg": V[fet.g], "vb": V[fet.b],
+        "vd": vd, "vs": V[fet.s], "vg": V[fet.g], "vb": V[fet.b],
     })
     for p in C.PROCESS_PARAMS:
         df[p] = corners[pre + p].to_numpy(dtype=float)
@@ -71,7 +88,12 @@ def _fet_frame(fet, corners, V):
 
 
 def fet_currents(models, gate, bits, corners, V, fets=None):
-    """{fet name: (n, 4) array [id, ig, is, ib]}, one model call per transistor case."""
+    """{fet name: (n, 4) array [id, ig, is, ib]}, one model call per transistor case.
+
+    Where |Vds| < VDS_FLOOR the model is evaluated at |Vds| = VDS_FLOOR; Ig and
+    Ib are kept, and the channel part A = (Id - Is)/2 is scaled linearly back to
+    the true Vds before Id = A + S, Is = -A + S (S = (Id + Is)/2) are rebuilt,
+    so KCL still holds exactly."""
     fets = gate.fets if fets is None else fets
     n = len(corners)
     by_case = {}
@@ -79,9 +101,21 @@ def fet_currents(models, gate, bits, corners, V, fets=None):
         by_case.setdefault(gate.fet_case(f, bits), []).append(f)
     out = {}
     for case, group in by_case.items():
-        I = models.predict(case, pd.concat([_fet_frame(f, corners, V) for f in group], ignore_index=True))
+        evals = [_eval_drain(f, V) for f in group]
+        frames = [_fet_frame(f, corners, V, vd) for f, (vd, _) in zip(group, evals)]
+        I = models.predict(case, pd.concat(frames, ignore_index=True))
         for k, f in enumerate(group):
-            out[f.name] = I[k * n:(k + 1) * n]
+            Ik = I[k * n:(k + 1) * n].copy()
+            vd_eval, small = evals[k]
+            if small.any():
+                vs = np.asarray(V[f.s], dtype=float)
+                vds_true = np.asarray(V[f.d], dtype=float) - vs
+                A = 0.5 * (Ik[:, 0] - Ik[:, 2])
+                S = 0.5 * (Ik[:, 0] + Ik[:, 2])
+                A = np.where(small, A * vds_true / (vd_eval - vs), A)
+                Ik[:, 0] = A + S
+                Ik[:, 2] = -A + S
+            out[f.name] = Ik
     return out
 
 

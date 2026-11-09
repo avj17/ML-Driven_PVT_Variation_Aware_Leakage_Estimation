@@ -16,12 +16,14 @@ VB  b   0 DC 0
 
 * M<name> drain gate source body model
 * NAND2 stage (output n1; x = node between the series NMOS), then INV
-Mnand_pa n1  a  vdd vdd pmos W=180n L=45n
-Mnand_pb n1  b  vdd vdd pmos W=180n L=45n
-Mnand_na n1  a  x   0   nmos W=180n L=45n
-Mnand_nb x   b  0   0   nmos W=180n L=45n
-Minv_p   out n1 vdd vdd pmos W=180n L=45n
-Minv_n   out n1 0   0   nmos W=90n  L=45n
+* Junction geometry as in the v3 Part A data: Ldiff = 2*Lmin = 90n,
+* AD = AS = W*Ldiff, PD = PS = 2*(W+Ldiff)
+Mnand_pa n1  a  vdd vdd pmos W=180n L=45n AD=1.62e-14 AS=1.62e-14 PD=5.4e-07 PS=5.4e-07
+Mnand_pb n1  b  vdd vdd pmos W=180n L=45n AD=1.62e-14 AS=1.62e-14 PD=5.4e-07 PS=5.4e-07
+Mnand_na n1  a  x   0   nmos W=180n L=45n AD=1.62e-14 AS=1.62e-14 PD=5.4e-07 PS=5.4e-07
+Mnand_nb x   b  0   0   nmos W=180n L=45n AD=1.62e-14 AS=1.62e-14 PD=5.4e-07 PS=5.4e-07
+Minv_p   out n1 vdd vdd pmos W=180n L=45n AD=1.62e-14 AS=1.62e-14 PD=5.4e-07 PS=5.4e-07
+Minv_n   out n1 0   0   nmos W=90n  L=45n AD=8.1e-15 AS=8.1e-15 PD=3.6e-07 PS=3.6e-07
 
 .control
 set numdgt = 12

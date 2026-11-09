@@ -24,7 +24,7 @@ SPICE simulation. It runs in three parts:
 | Part | State |
 |---|---|
 | A: transistor models | ✅ Done. The final MLP (v3) has a test **mean** error of 0.13–0.29 % (mean over Id/Ig/Is/Ib; below 1 % for every current) and R² = 1.000. See [`model_training/train_4.md`](model_training/train_4.md) |
-| B: gate-level validation | ✅ Done with the v2 models: 5 gates × all inputs × 200 corners (3,600 ngspice runs), ML vs SPICE median error 2.75 %, p95 15.6 %, mean accuracy 95.3 %. Being rerun with the v3 models (junction geometry added to the gate netlists). See [`part_b_gate_level/README.md`](part_b_gate_level/README.md) |
+| B: gate-level validation | ✅ Done with the v3 models: 5 gates × all inputs × 200 corners (3,600 ngspice runs), ML vs SPICE median error 0.26 %, p95 1.20 %, **mean accuracy 99.61 %**, every one of the 18 gate/input cases above 99 %. See [`part_b_gate_level/README.md`](part_b_gate_level/README.md) |
 | C: 3-bit CLA validation | ⏳ To do |
 
 ## Folder structure
@@ -179,20 +179,21 @@ The full details are in [`model_training/train_4.md`](model_training/train_4.md)
 - **Setup:**
   - INV, NAND2, NOR2, AND2 and OR2 at every input combination and 200 random PVT corners: 18 cases × 200 = 3,600 runs.
   - SPICE: transistor-level ngspice netlists. Their `.control` scripts draw the corners (seed 142), apply them with `alterparam`/`reset`, `option temp` and `alter`, and sweep the inputs.
-  - ML: the four Part A models, fed each transistor's terminal voltages from the recorded SPICE node voltages (spec Step 4).
+  - ML: the four v3 Part A models, fed each transistor's terminal voltages from the recorded SPICE node voltages (spec Step 4). The gate netlists carry the same junction geometry as the v3 training data.
 - **Leakage** = supply power / VDD:
   - SPICE: −I(VDD) plus the current of each input held at VDD;
   - ML: (1/VDD)·Σ(Vds·Id + Vgs·Ig + Vbs·Ib) over the transistors.
-- **Accuracy:**
+- **Accuracy** (v3 models):
 
   | | Median error | p95 error | Mean accuracy |
   |---|---|---|---|
-  | All runs | 2.75 % | 15.6 % | 95.3 % |
-  | Best gate (OR2) | | | 97.0 % |
-  | Worst gate (NAND2) | | | 93.0 % |
+  | **All 3,600 runs** | **0.26 %** | **1.20 %** | **99.61 %** |
+  | Best gate (AND2) | 0.27 % | 0.97 % | 99.64 % |
+  | Lowest gate (INV) | 0.33 % | 1.46 % | 99.52 % |
+  | Earlier, v2 models | 2.75 % | 15.6 % | 95.3 % |
 
-  - The main outlier is NAND2 AB=00 (two OFF NMOS in series), at 83.4 % mean accuracy.
-- **SPICE consistency:** the Part B way of setting a corner reproduces the Part A dataset currents to within 0.0005 %, so the remaining error is the ML models' own.
-- **The models are less accurate inside gates than on their own test set:** 0.4–0.7 % median error on the uniform test set, 2.75 % inside gates. Gates use the transistors at rail and stack-node voltages, which uniform sampling rarely covers; more training data there is the planned improvement.
+  - Every one of the 18 gate/input cases is above 99 % mean accuracy (lowest: NOR2 01, 99.46 %). The bias is within ±0.34 % everywhere, and the largest single error is 3.3 %.
+- **Small-Vds fix:** ON transistors in a gate sit at |Vds| ≈ 0, below the training range of the feature log(1 − exp(−|Vds|/Vt)). There the MLP extrapolated (ON PMOS gate current up to 27× too low; mean accuracy 95.0 % before the fix). The gate model now evaluates the transistor models at |Vds| ≥ 0.5 mV and scales the channel current back to the true Vds. No retraining was needed.
+- **SPICE consistency:** simulating each transistor of a gate alone in ngspice at the gate's node voltages reproduces the gate-level SPICE leakage, so the remaining error is the ML models' own.
 
 The full table (Deliverable 6), parity plot (Deliverable 7) and file-by-file description are in [`part_b_gate_level/README.md`](part_b_gate_level/README.md).
