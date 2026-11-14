@@ -25,7 +25,7 @@ SPICE simulation. It runs in three parts:
 |---|---|
 | A: transistor models | ✅ Done. The final MLP (v3) has a test **mean** error of 0.13–0.29 % (mean over Id/Ig/Is/Ib; below 1 % for every current) and R² = 1.000. See [`model_training/train_4.md`](model_training/train_4.md) |
 | B: gate-level validation | ✅ Done with the v3 models: 5 gates × all inputs × 200 corners (3,600 ngspice runs), ML vs SPICE median error 0.26 %, p95 1.20 %, **mean accuracy 99.61 %**, every one of the 18 gate/input cases above 99 %. See [`part_b_gate_level/README.md`](part_b_gate_level/README.md) |
-| C: 3-bit CLA validation | ⏳ To do |
+| C: 3-bit CLA validation | ✅ Done: all 128 input vectors × the same 200 corners (25,600 runs) of the full 186-transistor netlist in ngspice, against the hierarchical ML (CLA → gate → transistor models). Median error 0.25 %, p95 0.86 %, **mean accuracy 99.67 %**. See [`part_c_circuit_level/README.md`](part_c_circuit_level/README.md) |
 
 ## Folder structure
 
@@ -52,6 +52,13 @@ SPICE simulation. It runs in three parts:
 │   ├── step2_ml_gates.py         ML gate leakage (gate model -> transistor models)
 │   ├── step3_evaluate_gates.py   gate results table + parity plot
 │   └── gatelib/                  gate definitions, GateModel, output parsing/checks, metrics
+│
+├── part_c_circuit_level/         Part C: 3-bit CLA, 128 vectors × 200 corners, full-netlist SPICE vs hierarchical ML
+│   ├── spice/cla3.cir            ngspice netlist of the CLA (35 Part B gates, 186 transistors) + sweep
+│   ├── step1_collect_spice_cla.py  check + collect the ngspice output
+│   ├── step2_ml_cla.py           hierarchical ML (CLA -> gate models -> transistor models)
+│   ├── step3_evaluate_cla.py     results table, error analysis, parity plot
+│   └── cla/                      circuit definition + logic simulation, CLAModel
 │
 └── model_training/               Part A steps 2 to 5: model training and evaluation
     ├── train_4.md                full write-up: models, MLP architecture and training method, all metrics,
@@ -147,6 +154,14 @@ python run_part_b.py --skip-spice  # after new Part A models: redo only the ML s
 
 For a quick check set `let nrun = 5` in the five `.cir` files first.
 
+**5. Test-circuit validation (Part C)** (after Part B; needs `ngspice`):
+
+```bash
+cd part_c_circuit_level
+python run_part_c.py               # spice/cla3.cir (about 31 min), then steps 1-3
+python run_part_c.py --skip-spice  # reuse the ngspice output
+```
+
 ## Method in brief
 
 - **Data:** 10,000 SPICE samples per case (spec §4 distributions), with drain/source junction geometry (Ldiff = 90 nm), plus 30,000 extra training rows per case.
@@ -197,3 +212,20 @@ The full details are in [`model_training/train_4.md`](model_training/train_4.md)
 - **SPICE consistency:** simulating each transistor of a gate alone in ngspice at the gate's node voltages reproduces the gate-level SPICE leakage, so the remaining error is the ML models' own.
 
 The full table (Deliverable 6), parity plot (Deliverable 7) and file-by-file description are in [`part_b_gate_level/README.md`](part_b_gate_level/README.md).
+
+## Part C results in brief
+
+- **Setup:** the 3-bit carry-lookahead adder built from 35 Part B gates (186 transistors), at all 2^7 = 128 input vectors and the same 200 corners as Part B: 25,600 runs.
+  - SPICE: the complete transistor netlist in ngspice (`cla3.cir`), 1,880 s.
+  - ML: hierarchical. The CLA model logic-simulates the circuit, asks the Part B gate model for each gate's leakage at its inputs, and sums them. About 2 s.
+- **Accuracy:**
+
+  | | Median error | p95 error | Mean accuracy |
+  |---|---|---|---|
+  | **3-bit CLA (25,600 runs)** | **0.25 %** | **0.86 %** | **99.67 %** |
+  | Gate level (Part B) | 0.26 % | 1.20 % | 99.61 % |
+
+  - The bias is +0.05 % and the largest single error is 2.05 %. Every input vector is between 99.64 % and 99.69 %.
+- **Composition check:** the sum of the gate-level SPICE leakages matches the full netlist to a median 0.005 %, so the remaining error is the ML models' own.
+
+The full table (Deliverable 8), parity plot and error analysis are in [`part_c_circuit_level/README.md`](part_c_circuit_level/README.md).

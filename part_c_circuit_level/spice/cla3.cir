@@ -1,0 +1,176 @@
+* 3-bit carry-lookahead adder, complete transistor-level netlist (Part C, spec Step 6)
+* Leakage for all 128 input vectors (A2..A0, B2..B0, Cin) at the same 200 PVT corners as Part B.
+*
+* Run from this folder:   ngspice_con -b cla3.cir     (Linux/macOS: ngspice -b cla3.cir)
+* Output: ../results/spice_cla.txt, one line per (corner, vector), header first.
+* 25,600 operating points in one ngspice process: expect several minutes.
+*
+* Built only from the Part B gates (gates.lib: 35 gates, 186 transistors):
+*   P_i = A_i XOR B_i,  XOR(a,b) = AND2(NAND2(a,b), OR2(a,b));  G_i = INV(NAND2(A_i,B_i))
+*   C1 = G0 + P0.C0
+*   C2 = G1 + P1.G0 + P1.P0.C0
+*   C3 = G2 + P2.G1 + P2.P1.G0 + P2.P1.P0.C0
+*   S_i = P_i XOR C_i
+* The instance list must match part_c_circuit_level/cla/circuit.py (the hierarchical
+* ML side); step1_collect_spice_cla.py checks this.
+* Leakage = supply power / VDD = current delivered by VDD plus by every input held at VDD.
+
+.options gmin=1e-18 abstol=1e-18 reltol=1e-6 vntol=1e-9 numdgt=12
+.include ../../part_b_gate_level/spice/models/45nm_HP_param.pm
+.include ../../part_b_gate_level/spice/gates.lib
+
+VDD vdd 0 DC 0.9
+VA0 a0  0 DC 0
+VA1 a1  0 DC 0
+VA2 a2  0 DC 0
+VB0 b0  0 DC 0
+VB1 b1  0 DC 0
+VB2 b2  0 DC 0
+VC0 c0  0 DC 0
+
+* X<name> inputs... out vdd <gate>
+* propagate / generate, bit 0..2
+Xnab0 a0 b0 nab0 vdd NAND2
+Xgen0 nab0 g0 vdd INV
+Xoab0 a0 b0 oab0 vdd OR2
+Xprp0 nab0 oab0 p0 vdd AND2
+Xnab1 a1 b1 nab1 vdd NAND2
+Xgen1 nab1 g1 vdd INV
+Xoab1 a1 b1 oab1 vdd OR2
+Xprp1 nab1 oab1 p1 vdd AND2
+Xnab2 a2 b2 nab2 vdd NAND2
+Xgen2 nab2 g2 vdd INV
+Xoab2 a2 b2 oab2 vdd OR2
+Xprp2 nab2 oab2 p2 vdd AND2
+
+* C1 = G0 + P0.C0
+Xt_p0c0 p0 c0 t_p0c0 vdd AND2
+Xc1 g0 t_p0c0 c1 vdd OR2
+
+* C2 = G1 + P1.G0 + P1.P0.C0
+Xt_p1g0 p1 g0 t_p1g0 vdd AND2
+Xt_p1p0 p1 p0 t_p1p0 vdd AND2
+Xt_p1p0c0 t_p1p0 c0 t_p1p0c0 vdd AND2
+Xt_c2a g1 t_p1g0 t_c2a vdd OR2
+Xc2 t_c2a t_p1p0c0 c2 vdd OR2
+
+* C3 = G2 + P2.G1 + P2.P1.G0 + P2.P1.P0.C0
+Xt_p2g1 p2 g1 t_p2g1 vdd AND2
+Xt_p2p1 p2 p1 t_p2p1 vdd AND2
+Xt_p2p1g0 t_p2p1 g0 t_p2p1g0 vdd AND2
+Xt_p2p1p0c0 p2 t_p1p0c0 t_p2p1p0c0 vdd AND2
+Xt_c3a g2 t_p2g1 t_c3a vdd OR2
+Xt_c3b t_p2p1g0 t_p2p1p0c0 t_c3b vdd OR2
+Xc3 t_c3a t_c3b c3 vdd OR2
+
+* S_i = P_i XOR C_i
+Xsn0 p0 c0 sn0 vdd NAND2
+Xso0 p0 c0 so0 vdd OR2
+Xsum0 sn0 so0 s0 vdd AND2
+Xsn1 p1 c1 sn1 vdd NAND2
+Xso1 p1 c1 so1 vdd OR2
+Xsum1 sn1 so1 s1 vdd AND2
+Xsn2 p2 c2 sn2 vdd NAND2
+Xso2 p2 c2 so2 vdd OR2
+Xsum2 sn2 so2 s2 vdd AND2
+
+.control
+set numdgt = 12
+
+* ---- 200 PVT corners: this block is identical in every Part B and Part C netlist ----
+* Spec Section 4: VDD 0.9 V +-10 %, T -40..125 C, vth0/toxe/ndep/u0/xj nominal +-10 %,
+* one draw shared by all NMOS and one by all PMOS. sunif() is uniform in [-1, 1].
+setseed 142
+let nc      = 200
+let c_vdd   = 0.9      * (1 + 0.1 * sunif(vector(nc)))
+let c_temp  = 42.5     + 82.5 * sunif(vector(nc))
+let c_nvth0 = 0.46893  * (1 + 0.1 * sunif(vector(nc)))
+let c_ntoxe = 1.25e-9  * (1 + 0.1 * sunif(vector(nc)))
+let c_nndep = 3.24e18  * (1 + 0.1 * sunif(vector(nc)))
+let c_nu0   = 0.054    * (1 + 0.1 * sunif(vector(nc)))
+let c_nxj   = 1.4e-8   * (1 + 0.1 * sunif(vector(nc)))
+let c_pvth0 = -0.49158 * (1 + 0.1 * sunif(vector(nc)))
+let c_ptoxe = 1.3e-9   * (1 + 0.1 * sunif(vector(nc)))
+let c_pndep = 2.44e18  * (1 + 0.1 * sunif(vector(nc)))
+let c_pu0   = 0.02     * (1 + 0.1 * sunif(vector(nc)))
+let c_pxj   = 1.4e-8   * (1 + 0.1 * sunif(vector(nc)))
+* corners simulated: set nrun to e.g. 5 for a quick check (the first corners do not change)
+let nrun = nc
+* ---- end of corner block ----
+
+echo corner a2 a1 a0 b2 b1 b0 c0 vdd temp n_vth0 n_toxe n_ndep n_u0 n_xj p_vth0 p_toxe p_ndep p_u0 p_xj v_s0 v_s1 v_s2 v_c3 ileak ivdd > ../results/spice_cla.txt
+
+let k = 0
+while k lt nrun
+  * apply corner k: process via the model-card parameters, then temperature and VDD
+  let cvdd    = c_vdd[k]
+  let ctemp   = c_temp[k]
+  let cn_vth0 = c_nvth0[k]
+  let cn_toxe = c_ntoxe[k]
+  let cn_ndep = c_nndep[k]
+  let cn_u0   = c_nu0[k]
+  let cn_xj   = c_nxj[k]
+  let cp_vth0 = c_pvth0[k]
+  let cp_toxe = c_ptoxe[k]
+  let cp_ndep = c_pndep[k]
+  let cp_u0   = c_pu0[k]
+  let cp_xj   = c_pxj[k]
+  alterparam n_vth0=$&cn_vth0
+  alterparam n_toxe=$&cn_toxe
+  alterparam n_ndep=$&cn_ndep
+  alterparam n_u0=$&cn_u0
+  alterparam n_xj=$&cn_xj
+  alterparam p_vth0=$&cp_vth0
+  alterparam p_toxe=$&cp_toxe
+  alterparam p_ndep=$&cp_ndep
+  alterparam p_u0=$&cp_u0
+  alterparam p_xj=$&cp_xj
+  reset
+  option temp=$&ctemp
+  alter vdd dc = $&cvdd
+
+  * all 128 input vectors; each input is applied at exactly 0 or VDD
+  foreach c0 0 1
+    let vin = $c0 * cvdd
+    alter vc0 dc = $&vin
+    foreach b2 0 1
+      let vin = $b2 * cvdd
+      alter vb2 dc = $&vin
+      foreach b1 0 1
+        let vin = $b1 * cvdd
+        alter vb1 dc = $&vin
+        foreach b0 0 1
+          let vin = $b0 * cvdd
+          alter vb0 dc = $&vin
+          foreach a2 0 1
+            let vin = $a2 * cvdd
+            alter va2 dc = $&vin
+            foreach a1 0 1
+              let vin = $a1 * cvdd
+              alter va1 dc = $&vin
+              foreach a0 0 1
+                let vin = $a0 * cvdd
+                alter va0 dc = $&vin
+                op
+                let ileak = 0 - i(vdd) - $a0 * i(va0) - $a1 * i(va1) - $a2 * i(va2) - $b0 * i(vb0) - $b1 * i(vb1) - $b2 * i(vb2) - $c0 * i(vc0)
+                let ivdd  = 0 - i(vdd)
+                let vs0 = v(s0)
+                let vs1 = v(s1)
+                let vs2 = v(s2)
+                let vc3 = v(c3)
+                echo $&k $a2 $a1 $a0 $b2 $b1 $b0 $c0 $&cvdd $&ctemp $&cn_vth0 $&cn_toxe $&cn_ndep $&cn_u0 $&cn_xj $&cp_vth0 $&cp_toxe $&cp_ndep $&cp_u0 $&cp_xj $&vs0 $&vs1 $&vs2 $&vc3 $&ileak $&ivdd >> ../results/spice_cla.txt
+                * drop the op plot so the loop vectors (kept in the const plot) stay current
+                destroy all
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+  let k = k + 1
+end
+echo done: $&nrun corners simulated
+quit
+.endc
+.end
