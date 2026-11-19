@@ -105,62 +105,118 @@ SPICE simulation. It runs in three parts:
     └── logs/                     training logs (git-ignored)
 ```
 
-## How to run
+## How to reproduce every result (Deliverable 9)
 
-**1. Generate the data** (local machine; needs `ngspice` on `PATH`):
+Run the steps in this order from a fresh clone. Every step uses fixed seeds, so the
+datasets, splits and SPICE results come out identical; GPU training can differ only in
+the last digits. A full re-run of Parts B and C has been checked to match the committed
+results to within 2e-6.
+
+### 0. Setup
+
+```bash
+git clone https://github.com/avj17/ML-Driven_PVT_Variation_Aware_Leakage_Estimation.git
+cd ML-Driven_PVT_Variation_Aware_Leakage_Estimation
+pip install -r model_training/requirements.txt   # exact versions; plain torch/xgboost on a CPU-only machine
+```
+
+- **ngspice** must be on `PATH`. On Windows the scripts use the console build
+  `ngspice_con` (the plain `ngspice.exe` is a GUI build that prints nothing); run them
+  from PowerShell.
+- **On Ada** (training), once, on a GPU compute node:
+  `bash model_training/setup_venv_ada.sh` (CUDA builds of torch/xgboost, NCCL fix).
+
+### 1. Datasets: Deliverables 1, 2, 3 (local machine, ngspice, about 45 min)
 
 ```bash
 cd data_set_generattion
-python generate_data.py --extra 30000   # <CASE>_new.csv (10,000 rows) + <CASE>_new_extra.csv (30,000 rows)
-python check_data.py                    # KCL check + trend plots
+python generate_data.py --extra 30000   # 160,000 single-transistor SPICE runs
+python check_data.py                    # KCL check + the three trend plots
 ```
 
-On Windows, `generate_data.py` uses the console build `ngspice_con` (the plain
-`ngspice.exe` is a GUI build that prints nothing).
+| Output | Deliverable |
+|---|---|
+| `{NMOS,PMOS}_{ON,OFF}_new.csv`: 10,000 rows each (seed 42) | 1 |
+| `{NMOS,PMOS}_{ON,OFF}_new_extra.csv`: 30,000 training-only rows each (seed 4242) | – |
+| `{nmos,pmos}_{on,off}_new.net`: example netlists | 2 |
+| KCL table (printed), `plot1/2/3_*_new.png` | 3 |
 
-**2. Train and evaluate** (GPU; we used the Ada HPC cluster with an RTX 2080 Ti):
+Quick timing test: `python generate_data.py --cases NMOS_OFF --limit 600`.
+
+### 2. Part A transistor models: Deliverables 4, 5 (Ada, GPU)
 
 ```bash
 cd model_training
-bash setup_venv_ada.sh                            # once, on a compute node
-sbatch run_experiments.sh                         # v3 MLP recipe study
-MODELS=mlp STEPS="train eval size" sbatch run_all.sh    # final v3 MLPs -> v3/
-LEAKAGE_DATASET=orig sbatch run_all.sh            # all 4 families on the first data (v2 comparison)
+
+# Final v3 MLPs on the final data (LEAKAGE_DATASET=new is the default), outputs in v3/
+sbatch run_experiments.sh                                # v3 recipe study       (~1.5 h)
+MODELS=mlp STEPS="train eval size" sbatch run_all.sh     # train, test, size curve (~6 h)
+
+# Four-family comparison (Elastic Net, RF, XGBoost, MLP) on the first data, outputs in results/
+LEAKAGE_DATASET=orig sbatch run_all.sh                   # incl. raw-feature ablation (~10-14 h)
+LEAKAGE_DATASET=orig python analyze_errors.py            # error analysis, TRAIN/VAL only
 ```
 
-`LEAKAGE_DATASET` selects the data: `new` (the default) or `orig`. The steps
-can also be run one by one: `python train.py`, then `python evaluate.py`, then
-`python data_size_curve.py`. `python train.py --quick` is a fast smoke test.
+| Output | Deliverable |
+|---|---|
+| `results/model_comparison_val.md`: 4 model types x 4 cases | 4 |
+| `v3/results/chosen_models_test.md`: test median / p95 / mean error | 5 |
+| `v3/results/plots/<CASE>_parity_test.png`: predicted vs SPICE | 5 |
+| `v3/saved_models/<CASE>.joblib`: the four model files | 5 |
+| `v3/results/data_size_curve.csv`, search traces in `v3/results/candidates/` | report |
 
-**3. Use a trained model** (Parts B and C):
+Without Slurm, run the steps one by one: `python train.py --models mlp`, then
+`python evaluate.py`, then `python data_size_curve.py` (`--cases NMOS_OFF` for one case,
+`python train.py --quick` for a smoke test).
+
+### 3. Part B gate-level validation: Deliverables 2, 6, 7 (local machine, ngspice + torch, about 20 min)
+
+```bash
+cd part_b_gate_level
+python run_part_b.py               # spice/*.cir (5 gates x all inputs x 200 corners), then steps 1-3
+python run_part_b.py --skip-spice  # reuse the ngspice output, redo only the ML steps
+```
+
+| Output | Deliverable |
+|---|---|
+| `spice/{inv,nand2,nor2,and2,or2}.cir`, `spice/gates.lib` | 2 |
+| `results/gate_results_table.md` | 6 |
+| `results/plots/gate_parity.png` | 7 |
+
+### 4. Part C test circuit (3-bit CLA): Deliverables 2, 8 (after Part B; ngspice about 31 min, ML about 2 s)
+
+```bash
+cd part_c_circuit_level
+python run_part_c.py               # spice/cla3.cir (128 vectors x 200 corners), then steps 1-3
+python run_part_c.py --skip-spice  # reuse the ngspice output
+```
+
+| Output | Deliverable |
+|---|---|
+| `spice/cla3.cir` | 2 |
+| `results/cla_results_table.md`, `results/plots/cla_parity.png` | 8 |
+
+For a quick check of Parts B and C, set `let nrun = 5` in the `.cir` files first.
+
+### Seeds
+
+| What | Seed |
+|---|---|
+| Main / extra transistor samples | 42 / 4242 (`data_set_generattion/generate_data.py`) |
+| Train / validation / test split | 42; indices saved in `results/splits/` |
+| CV folds, model init, torch init | 43 / 44 / 45; ensemble members 45-49 (`model_training/leakage_ml/config.py`) |
+| Part B / C corners | `setseed 142`, the same corner block in all six netlists |
+
+### Use a trained model (Parts B and C do this)
 
 ```python
 from leakage_ml.predictor import LeakagePredictor
 m = LeakagePredictor.load("v3/saved_models/NMOS_OFF.joblib")
-I = m.predict(df)   # df columns: vdd,temp,w,vd,vs,vg,vb,vth0,toxe,ndep,u0,xj → (n, 4) amperes [id, ig, is, ib]
+I = m.predict(df)   # df columns: vdd,temp,w,vd,vs,vg,vb,vth0,toxe,ndep,u0,xj -> amperes [id, ig, is, ib]
 ```
 
-Loading a model on a CPU-only machine needs plain `torch` and `xgboost`; the
-CUDA builds are not required.
-
-**4. Gate-level validation (Part B)** (local machine; needs `ngspice`).
-The SPICE side is ngspice netlists; the runner runs them and then the Python ML/analysis steps:
-
-```bash
-cd part_b_gate_level
-python run_part_b.py               # spice/*.cir, then steps 1-3
-python run_part_b.py --skip-spice  # after new Part A models: redo only the ML steps
-```
-
-For a quick check set `let nrun = 5` in the five `.cir` files first.
-
-**5. Test-circuit validation (Part C)** (after Part B; needs `ngspice`):
-
-```bash
-cd part_c_circuit_level
-python run_part_c.py               # spice/cla3.cir (about 31 min), then steps 1-3
-python run_part_c.py --skip-spice  # reuse the ngspice output
-```
+Loading a model on a CPU-only machine needs plain `torch` and `xgboost`; the CUDA builds
+are not required.
 
 ## Method in brief
 
